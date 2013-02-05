@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               ActiveRecord-Simple
-version:            0.21
+version:            0.22
 abstract:           Simple to use lightweight implementation of
 author:
     - shootnix <shootnix@cpan.org>
