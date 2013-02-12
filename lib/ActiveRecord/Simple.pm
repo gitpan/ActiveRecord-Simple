@@ -11,16 +11,16 @@ ActiveRecord pattern.
 
 =head1 VERSION
 
-Version 0.22
+Version 0.25
 
 =cut
 
-our $VERSION = '0.23';
+our $VERSION = '0.25';
 
-use Data::Dumper;
 use utf8;
 use Encode;
 use Module::Load;
+use Carp;
 
 my $dbhandler = undef;
 
@@ -31,36 +31,73 @@ sub new {
 
     if ( $class->can('get_relations') ) {
         my $relations = $class->get_relations;
+
 	no strict 'refs';
+
         RELNAME:
         for my $relname ( keys %{ $relations } ) {
             my $pkg_method_name = $class . '::' . $relname;
+
             next RELNAME if $class->can($pkg_method_name);
 
             *{$pkg_method_name} = sub {
                 my $self = shift;
+
                 unless ( $self->{"relation_instance_$relname"} ) {
-                    my $relation = $class->get_relations->{$relname};
-                    my $pkey = $self->get_primary_key;
+                    my $rel  = $class->get_relations->{$relname};
+                    my $fkey = $rel->{foreign_key} || $rel->{key};
 
-                    load $relation->{class};
+                    my $type = $rel->{type} . '_to_';
+                    my $rel_class = ( ref $rel->{class} eq 'HASH' ) ?
+                        ( %{ $rel->{class} } )[1]
+                        : $rel->{class};
 
-                    my $type = $relation->{type};
-                    my $fkey = $relation->{foreign_key};
+                    load $rel_class;
 
-                    if ( $type eq 'one' ) {
-                        $self->{"relation_instance_$relname"} =
-			    $relation->{class}->find(
-                                "$fkey = ?",
-                                $self->$pkey
-                            )->fetch();
+                    while ( my ($rel_key, $rel_opts) = each %{ $rel_class->get_relations } ) {
+                        my $rel_opts_class = ( ref $rel_opts->{class} eq 'HASH' ) ?
+                            ( %{ $rel_opts->{class} } )[1]
+                            : $rel_opts->{class};
+                        $type .= $rel_opts->{type} if $rel_opts_class eq $class;
                     }
-                    elsif ( $type eq 'many' ) {
+
+                    if ( $type ~~ ['one_to_many', 'one_to_one'] ) {
+                        my ($pkey, $fkey_val);
+                        if ( $rel_class->can('get_primary_key') ) {
+                            $pkey = $rel_class->get_primary_key;
+                            $fkey_val = $self->$fkey;
+                        }
+                        else {
+                            $pkey = $fkey;
+                            my $self_pkey = $self->get_primary_key;
+                            $fkey_val = $self->$self_pkey;
+                        }
+
+                        $self->{"relation_instance_$relname"} = $rel_class->find(
+                            "$pkey = ?",
+                            $fkey_val
+                        )->fetch();
+                    }
+                    elsif ( $type ~~ ['many_to_one'] ) {
+                        unless ( $self->can('get_primary_key') ) {
+                            return $rel_class->new();
+                        }
+
+                        my $pkey = $self->get_primary_key;
                         $self->{"relation_instance_$relname"} =
-			    $relation->{class}->find(
+			    $rel_class->find(
 				"$fkey = ?",
 				$self->$pkey,
 			    );
+                    }
+                    elsif ( $type ~~ ['many_to_many'] ) {
+                        $self->{"relation_instance_$relname"} =
+                            $rel_class->_find_many_to_many({
+                                root_class => $class,
+                                m_class    => ( %{ $rel->{class} } )[0],
+                                self       => $self,
+                                #middle_class_name => ( %{ $rel->{class} } )[0],
+                            });
                     }
                 }
 
@@ -73,6 +110,58 @@ sub new {
     $param->{isin_database} = undef;
 
     return bless $param || {}, $class;
+}
+
+sub _find_many_to_many {
+    my ($class, $param) = @_;
+
+    return unless $class->dbh && $param;
+
+    my $mc_fkey;
+    my $class_opts = {};
+    my $root_class_opts = {};
+
+    for my $opts ( values %{ $param->{m_class}->get_relations } ) {
+        if ($opts->{class} eq $param->{root_class}) {
+            $root_class_opts = $opts;
+        }
+        elsif ($opts->{class} eq $class) {
+            $class_opts = $opts;
+        }
+    }
+
+    my $connected_table_name = $class->get_table_name;
+    my @sql_tokens = (
+        'select',
+        "$connected_table_name\.*",
+        'from',
+        $param->{m_class}->get_table_name,
+        'join',
+        $connected_table_name,
+        'on',
+        $connected_table_name . '.' . $class->get_primary_key,
+        '=',
+        $param->{m_class}->get_table_name . '.' . $class_opts->{key},
+        'where',
+        $root_class_opts->{key},
+        '=',
+        $param->{self}->{ $param->{root_class}->get_primary_key },
+    );
+    my $sql_stm = join q/ /, @sql_tokens;
+
+    my $container_class = $class->new();
+    my $resultset = $class->dbh->selectall_arrayref($sql_stm, { Slice => {} });
+    my @bulk_objects;
+    for my $params (@$resultset) {
+        my $obj = $class->new($params);
+
+        $obj->{isin_database} = 1;
+        push @bulk_objects, $obj;
+    }
+
+    $container_class->{_objects} = \@bulk_objects;
+
+    return $container_class;
 }
 
 sub _mk_accessors {
@@ -168,11 +257,14 @@ sub save {
 
     my $save_param = {};
     my $fields = $self->get_columns;
-    my $pkey   = $self->get_primary_key;
+    my $pkey;
+    if ( $self->can('get_primary_key') ) {
+        $pkey   = $self->get_primary_key;
+    }
 
     FIELD:
     for my $field (@$fields) {
-        next FIELD if $field eq $pkey && !$self->{$pkey};
+        next FIELD if $pkey && $field eq $pkey && !$self->{$pkey};
         $save_param->{$field} = $self->{$field};
     }
 
@@ -192,21 +284,29 @@ sub _insert {
 
     return unless $self->dbh && $param;
 
+    #say Dumper $param;
+
     my $table_name      = $self->get_table_name;
     my @field_names     = grep { defined $param->{$_} } sort keys %$param;
-    my $primary_key     = $self->get_primary_key;
+    my $primary_key;
+    if ( $self->can('get_primary_key') ) {
+        $primary_key = $self->get_primary_key;
+    }
+    #my $primary_key     = $self->get_primary_key;
 
     my $field_names_str = join q/, /, map { q/"/ . $_ . q/"/ } @field_names;
     my $values          = join q/, /, map { '?' } @field_names;
     my @bind            = map { $param->{$_} } @field_names;
 
     my $pkey_val;
+    my $sql_stm = qq{
+        insert into "$table_name" ($field_names_str)
+        values ($values)
+    };
+
+    #say 'SQL: ' . $sql_stm;
     if ( $self->dbh->{Driver}->{Name} eq 'Pg' ) {
-	my $sql_stm = qq{
-            insert into "$table_name" ($field_names_str)
-            values ($values)
-            returning $primary_key
-        };
+        $sql_stm .= ' returning ' . $primary_key if $primary_key;
 
 	$pkey_val = $self->dbh->selectrow_array(
 	    _quote_string($sql_stm, $self->dbh->{Driver}{Name}),
@@ -215,17 +315,12 @@ sub _insert {
 	);
     }
     else {
-	my $sql_stm = qq{
-	    insert into "$table_name" ($field_names_str)
-	    values ($values)
-        };
-
 	my $sth = $self->dbh->prepare(
 	    _quote_string($sql_stm, $self->dbh->{Driver}{Name})
 	);
         $sth->execute(@bind);
 
-	if ( defined $self->{$primary_key} ) {
+	if ( $primary_key && defined $self->{$primary_key} ) {
 	    $pkey_val = $self->{$primary_key};
 	}
 	else {
@@ -238,7 +333,9 @@ sub _insert {
 	}
     }
 
-    $self->$primary_key($pkey_val);
+    if ( $primary_key && $self->can($primary_key) && $pkey_val ) {
+        $self->$primary_key($pkey_val);
+    }
     $self->{isin_database} = 1;
 
     return $pkey_val;
@@ -360,6 +457,7 @@ sub find {
         else {
             my $pkeyval = $param[0];
             $resultset = $self->_find_one_by_primary_key($pkeyval);
+
             $self->_fill_params($resultset);
             $self->{isin_database} = 1;
         }
@@ -466,6 +564,8 @@ sub _find_one_by_primary_key {
     return unless $self->dbh;
 
     my $table_name = $self->get_table_name;
+    #return unless $self->can('get_primary_key');
+
     my $pkey = $self->get_primary_key;
 
     my $sql_stmt = qq{
@@ -484,9 +584,7 @@ sub _find_one_by_primary_key {
 sub is_defined {
     my ($self) = @_;
 
-    my $pkey = $self->get_primary_key;
-
-    return $self->{$pkey};
+    return grep { defined $self->{$_} } @{ $self->get_columns };
 }
 
 # param:
@@ -578,12 +676,12 @@ ActiveRecord::Simple
 
 =head1 VERSION
 
-0.21
+0.25
 
 =head1 DESCRIPTION
 
 ActiveRecord::Simple is a simple lightweight implementation of ActiveRecord
-pattern. It's fast, very simple and very ligth.
+pattern. It's fast, very simple and very light.
 
 =head1 SYNOPSIS
 
@@ -625,14 +723,14 @@ That's it! Now you're ready to use your active-record class in the application:
     # You can add any relationships to your tables:
     __PACKAGE__->relations({
         cars => {
-            class       => 'MyModel::Car',
-            foreign_key => 'id_person',
-            type        => 'many',
+            class => 'MyModel::Car',
+            key   => 'id_person',
+            type  => 'many',
         },
         wife => {
-            class       => 'MyModel::Wife',
-            foreign_key => 'id_person',
-            type        => 'one',
+            class => 'MyModel::Wife',
+            key   => 'id_person',
+            type  => 'one',
         }
     });
 
@@ -644,7 +742,7 @@ That's it! Now you're ready to use your active-record class in the application:
 
 ActiveState::Simple provides a variety of techniques to make your work with
 data little easier. It contains only a basic set of operations, such as
-serch, create, update and delete data.
+search, create, update and delete data.
 
 If you realy need more complicated solution, just try to expand on it with your
 own methods.
@@ -653,7 +751,7 @@ own methods.
 
 Class methods mean that you can't do something with a separate row of the table,
 but they need to manipulate of the table as a whole object. You may find a row
-in the table or keep database hanlder etc.
+in the table or keep database handler etc.
 
 =head2 new
 
@@ -675,14 +773,14 @@ method is required to use in the child (your model) classes.
 
     __PACKAGE__->primary_key('id_person');
 
-Set name of the primary key. This method is reqired to use in the child
+Set name of the primary key. This method is not required to use in the child
 (your model) classes.
 
 =head2 table_name
 
     __PACKAGE__->table_name('persons');
 
-Set name of the table. This method is reqired to use in the child (your model)
+Set name of the table. This method is required to use in the child (your model)
 classes.
 
 =head2 relations
@@ -690,20 +788,20 @@ classes.
     __PACKAGE__->relations({
         cars => {
             class => 'MyModel::Car',
-            foreign_key => 'id_person',
-            type => 'many'
+            key   => 'id_person',
+            type  => 'many'
         },
     });
 
 It's not a required method and you don't have to use it if you don't want to use
-any relationships in youre tables and objects. However, if you need to,
+any relationships in your tables and objects. However, if you need to,
 just keep this simple schema in youre mind:
 
     __PACKAGE__->relations({
         [relation key] => {
             class => [class name],
-            foreign_key => [column that refferers to the table],
-            type => [many or one]
+            key   => [column that refferers to the table],
+            type  => [many or one]
         },
     })
 
@@ -730,7 +828,7 @@ There are several ways to find someone in your database using ActiveRecord::Simp
     # by where-condtions:
     my @persons = MyModel::Person->find('first_name = ? and id_person > ?', 'Foo', 1);
 
-If you want to get an instance of youre active-record class and if you know the
+If you want to get an instance of your active-record class and if you know the
 primary key, you can do it, just put the primary key as a parameter into the
 find method:
 
