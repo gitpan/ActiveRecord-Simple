@@ -1,26 +1,27 @@
---- #YAML:1.0
-name:               ActiveRecord-Simple
-version:            0.25
-abstract:           Simple to use lightweight implementation of
+---
+abstract: 'Simple to use lightweight implementation of'
 author:
-    - shootnix <shootnix@cpan.org>
-license:            perl
-distribution_type:  module
-configure_requires:
-    ExtUtils::MakeMaker:  0
+  - 'shootnix <shootnix@cpan.org>'
 build_requires:
-    Test::More:  0
-requires:
-    DBI:           0
-    Module::Load:  0
-    perl:          5.010
-resources:
-    repository:  https://github.com/shootnix/activerecord-simple
-no_index:
-    directory:
-        - t
-        - inc
-generated_by:       ExtUtils::MakeMaker version 6.57_05
+  ExtUtils::MakeMaker: 0
+  Test::More: 0
+configure_requires:
+  ExtUtils::MakeMaker: 0
+dynamic_config: 1
+generated_by: 'ExtUtils::MakeMaker version 6.64, CPAN::Meta::Converter version 2.112621'
+license: perl
 meta-spec:
-    url:      http://module-build.sourceforge.net/META-spec-v1.4.html
-    version:  1.4
+  url: http://module-build.sourceforge.net/META-spec-v1.4.html
+  version: 1.4
+name: ActiveRecord-Simple
+no_index:
+  directory:
+    - t
+    - inc
+requires:
+  DBI: 0
+  Module::Load: 0
+  perl: 5.010
+resources:
+  repository: https://github.com/shootnix/activerecord-simple
+version: 0.30

@@ -11,11 +11,11 @@ ActiveRecord pattern.
 
 =head1 VERSION
 
-Version 0.25
+Version 0.30
 
 =cut
 
-our $VERSION = '0.25';
+our $VERSION = '0.30';
 
 use utf8;
 use Encode;
@@ -284,15 +284,12 @@ sub _insert {
 
     return unless $self->dbh && $param;
 
-    #say Dumper $param;
-
     my $table_name      = $self->get_table_name;
     my @field_names     = grep { defined $param->{$_} } sort keys %$param;
     my $primary_key;
     if ( $self->can('get_primary_key') ) {
         $primary_key = $self->get_primary_key;
     }
-    #my $primary_key     = $self->get_primary_key;
 
     my $field_names_str = join q/, /, map { q/"/ . $_ . q/"/ } @field_names;
     my $values          = join q/, /, map { '?' } @field_names;
@@ -304,7 +301,6 @@ sub _insert {
         values ($values)
     };
 
-    #say 'SQL: ' . $sql_stm;
     if ( $self->dbh->{Driver}->{Name} eq 'Pg' ) {
         $sql_stm .= ' returning ' . $primary_key if $primary_key;
 
@@ -398,68 +394,27 @@ sub delete {
 sub find {
     my ($class, @param) = @_;
 
-    my $resultset;
     my $self = $class->new();
+    if (scalar @param == 1 && !ref $param[0]) {
+        #my $self = $class->new();
+        my $resultset = $self->_find_one_by_primary_key($param[0]);
 
-    if ( ref $param[0] eq 'HASH' ) {
-        $resultset = $self->_find_many_by_params( $param[0] );
-
-        my @bulk_objects;
-        if ( $resultset && ref $resultset eq 'ARRAY' && scalar @$resultset > 0 ) {
-            for my $param (@$resultset) {
-		my $obj = $class->new($param);
-		$obj->{isin_database} = 1;
-                push @bulk_objects, $obj;
-            }
-        }
-        else {
-            push @bulk_objects, $self;
-        }
-
-        $self->{_objects} = \@bulk_objects;
-    }
-    elsif ( ref $param[0] eq 'ARRAY' ) {
-	my $pkeyvals = $param[0];
-	my $resultset = $self->_find_many_by_primary_keys($pkeyvals);
-
-	my @bulk_objects;
-	if ( $resultset && ref $resultset eq 'ARRAY' && scalar @$resultset > 0 ) {
-	    for my $paramset (@$resultset) {
-		my $obj = $class->new($paramset);
-		$obj->{isin_database} = 1;
-		push @bulk_objects, $obj;
-	    }
-	}
-	else {
-	    push @bulk_objects, $self;
-	}
-
-	$self->{_objects} = \@bulk_objects;
+        $self->_fill_params($resultset);
+        $self->{isin_database} = 1;
     }
     else {
-        if ( scalar @param > 1 ) {
-            $resultset = $self->_find_many_by_condition(@param);
+        ### ... prepare the request
+        $self->{prep_request_method} = undef;
+        $self->{prep_request_params} = \@param;
 
-            my @bulk_objects;
-            if ( $resultset && ref $resultset eq 'ARRAY' && scalar @$resultset > 0 ) {
-                for my $param (@$resultset) {
-		    my $obj = $class->new($param);
-		    $obj->{isin_database} = 1;
-                    push @bulk_objects, $obj;
-                }
-            }
-            else {
-                push @bulk_objects, $self;
-            }
-
-            $self->{_objects} = \@bulk_objects;
+        if (ref $param[0] && ref $param[0] eq 'HASH') {
+            $self->{prep_request_method} = '_find_many_by_params';
+        }
+        elsif (ref $param[0] && ref $param[0] eq 'ARRAY') {
+            $self->{prep_request_method} = '_find_many_by_primary_keys';
         }
         else {
-            my $pkeyval = $param[0];
-            $resultset = $self->_find_one_by_primary_key($pkeyval);
-
-            $self->_fill_params($resultset);
-            $self->{isin_database} = 1;
+            $self->{prep_request_method} = '_find_many_by_condition';
         }
     }
 
@@ -467,6 +422,63 @@ sub find {
 }
 
 sub fetch {
+    my ($self, $limit) = @_;
+
+    if (defined $self->{_objects}) {
+        return $self->_get($limit);
+    }
+
+    my $resultset = $self->_find_many_by_prepared_statement();
+
+    my @bulk_objects;
+    if (defined $resultset && ref $resultset eq 'ARRAY' && scalar @$resultset > 0) {
+        my $class = ref $self;
+        for my $object_data (@$resultset) {
+            my $obj = $class->new($object_data);
+            $obj->{isin_database} = 1;
+            push @bulk_objects, $obj;
+        }
+    }
+    else {
+        push @bulk_objects, $self;
+    }
+
+    $self->{_objects} = \@bulk_objects;
+
+    $self->_get($limit);
+}
+
+sub order_by {
+    my ($self, @param) = @_;
+
+    return if not defined $self->{prep_request_method};
+
+    $self->{prep_order_by} = \@param;
+
+    return $self;
+}
+
+sub desc {
+    my ($self, @param) = @_;
+
+    return if not defined $self->{prep_request_method};
+
+    $self->{prep_desc} = \@param;
+
+    return $self;
+}
+
+sub asc {
+    my ($self, @param) = @_;
+
+    return if not defined $self->{prep_request_method};
+
+    $self->{prep_asc} = \@param;
+
+    return $self;
+}
+
+sub _get {
     my ($self, $time) = @_;
 
     return unless $self->{_objects} && ref $self->{_objects} eq 'ARRAY';
@@ -494,6 +506,19 @@ sub _fill_params {
     return $self;
 }
 
+sub _find_many_by_prepared_statement {
+    my ($self) = @_;
+
+    return unless $self->{prep_request_method} && $self->{prep_request_params};
+
+    my $method = $self->{prep_request_method};
+    my @params = @{ $self->{prep_request_params} };
+
+    my $resultset = $self->$method(@params);
+
+    return $resultset;
+}
+
 sub _find_many_by_primary_keys {
     my ($self, $pkeyvals) = @_;
 
@@ -509,10 +534,37 @@ sub _find_many_by_primary_keys {
 	    "$pkey" in ($whereinstr)
     };
 
+    $self->_add_result_ordering($sql_stmt) if defined $self->{prep_order_by};
+
     return $self->dbh->selectall_arrayref(
 	_quote_string($sql_stmt, $self->dbh->{Driver}{Name}),
 	{ Slice => {} }
     );
+}
+
+sub _add_result_ordering {
+    my ($self, $sql_stmt) = @_;
+
+    if (defined $self->{prep_order_by}) {
+        $$sql_stmt .= ' order by ';
+        $$sql_stmt .= join q/, /, map { q/"/.$_.q/"/ } @{ $self->{prep_order_by} };
+    }
+
+    if (defined $self->{prep_desc}) {
+        $$sql_stmt .= ' desc';
+    }
+
+    if (defined $self->{prep_asc}) {
+        $$sql_stmt .= ' asc';
+    }
+
+    $self->_delete_keys(qr/^prep\_/);
+}
+
+sub _delete_keys {
+    my ($self, $rx) = @_;
+
+    map { delete $self->{$_} if $_ =~ $rx } keys %$self;
 }
 
 sub _find_many_by_condition {
@@ -528,6 +580,8 @@ sub _find_many_by_condition {
         where
             $wherestr
     };
+
+    $self->_add_result_ordering(\$sql_stmt) if defined $self->{prep_order_by};
 
     return $self->dbh->selectall_arrayref(
 	_quote_string($sql_stmt, $self->dbh->{Driver}{Name}),
@@ -545,14 +599,16 @@ sub _find_many_by_params {
     my $where_str = join q/ and /, map { q/"/ . $_ . q/"/ .' = ?' } sort keys %$param;
     my @bind = values %$param;
 
-    my $sql_stm = qq{
+    my $sql_stmt = qq{
         select * from "$table_name"
         where
             $where_str
     };
 
+    $self->_add_result_ordering(\$sql_stmt) if defined $self->{prep_order_by};
+
     return $self->dbh->selectall_arrayref(
-	_quote_string($sql_stm, $self->dbh->{Driver}{Name}),
+	_quote_string($sql_stmt, $self->dbh->{Driver}{Name}),
 	{ Slice => {} },
 	@bind
     );
@@ -573,6 +629,8 @@ sub _find_one_by_primary_key {
         where
             "$pkey" = ?
     };
+
+    $self->_add_result_ordering(\$sql_stmt) if defined $self->{prep_order_by};
 
     return $self->dbh->selectrow_hashref(
 	_quote_string($sql_stmt, $self->dbh->{Driver}{Name}),
@@ -862,6 +920,33 @@ If you want to use a real sql where-condition:
     my $res = MyModel::Person->find('first_name = ? or id_person > ?', 'Foo', 1);
     # select * from persons where first_name = "Foo" or id_person > 1;
 
+You can use the ordering of results, such as ORDER BY, ASC and DESC:
+
+    my @persons = MyModel::Person->find('age > ?', 21)->order_by('name')->desc->fetch();
+    my @persons = MyModel::Person->find('age > ?', 21)->order_by('name', 'age')->fetch();
+
+=head2 order_by
+
+Order your results by specified fields:
+
+    my @persons = MyModel::Person->find({ city => 'NY' })->order_by('name')->fetch();
+
+This method uses as many fields as you want:
+
+    my @fields = ('name', 'age', 'zip');
+    my @persons = MyModel::Person->find({ city => 'NY' })->order_by(@fields)->fetch();
+
+=head2 asc
+
+Use this attribute to order your results ascending:
+
+    MyModel::Person->find([1, 3, 5, 2])->order_by('id')->asc->fetch();
+
+=head2 desc
+
+Use this attribute to order your results ascending:
+
+    MyModel::Person->find([1, 3, 5, 2])->order_by('id')->desc->fetch();
 
 =head2 dbh
 
