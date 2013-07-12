@@ -1,5 +1,5 @@
 ---
-abstract: 'Simple to use lightweight implementation of'
+abstract: 'Simple to use lightweight implementation of ActiveRecord pattern.'
 author:
   - 'shootnix <shootnix@cpan.org>'
 build_requires:
@@ -21,7 +21,8 @@ no_index:
 requires:
   DBI: 0
   Module::Load: 0
+  Storable: 0
   perl: 5.010
 resources:
   repository: https://github.com/shootnix/activerecord-simple
-version: 0.32
+version: 0.33

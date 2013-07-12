@@ -6,21 +6,21 @@ use warnings;
 
 =head1 NAME
 
-ActiveRecord::Simple - Simple to use lightweight implementation of
-ActiveRecord pattern.
+ActiveRecord::Simple - Simple to use lightweight implementation of ActiveRecord pattern.
 
 =head1 VERSION
 
-Version 0.32
+Version 0.33
 
 =cut
 
-our $VERSION = '0.32';
+our $VERSION = '0.33';
 
 use utf8;
 use Encode;
 use Module::Load;
 use Carp;
+use Storable qw/freeze/;
 
 my $dbhandler = undef;
 
@@ -206,6 +206,12 @@ sub table_name {
     $class->_mk_attribute_getter('get_table_name', $table_name);
 }
 
+sub use_smart_saving {
+    my ($class) = @_;
+
+    $class->_mk_attribute_getter('is_smart_saving_turned_on', 1);
+}
+
 sub relations {
     my ($class, $relations) = @_;
 
@@ -259,6 +265,11 @@ sub save {
     if ( $self->can('get_primary_key') ) {
         $pkey   = $self->get_primary_key;
     }
+
+    return 1 if defined $self->{snapshoot}
+                && $self->{snapshoot} eq freeze($self->to_hash);
+
+    #say 'SAVE!';
 
     FIELD:
     for my $field (@$fields) {
@@ -397,6 +408,11 @@ sub find {
         my $resultset = $self->_find_one_by_primary_key($param[0]);
 
         $self->_fill_params($resultset);
+        if ($self->can('is_smart_saving_turned_on') && $self->is_smart_saving_turned_on == 1) {
+            #say 'Yes!';
+            $self->{snapshoot} = freeze($resultset);
+        }
+
         $self->{isin_database} = 1;
     }
     else {
@@ -698,6 +714,7 @@ sub get_all {
 
 # param:
 #     only_defined_fields => 1
+###  TODO: refactor this
 sub to_hash {
     my ($self, $param) = @_;
 
@@ -726,11 +743,11 @@ ActiveRecord::Simple
 
 =head1 VERSION
 
-0.32
+0.33
 
 =head1 DESCRIPTION
 
-ActiveRecord::Simple is a simple lightweight implementation of ActiveRecord 
+ActiveRecord::Simple is a simple lightweight implementation of ActiveRecord
 pattern. It's fast, very simple and very light.
 
 =head1 SYNOPSIS
@@ -860,6 +877,13 @@ just keep this simple schema in youre mind:
     associated with this relationship. Allowed to use as many keys as you need:
 
     $package_instance->[relation key]->[any method from the related class];
+
+=head2 use_smart_saving
+
+Check the changes of object's data before saving in the database. Won't save
+if data didn't change.
+
+    __PACKAGE__->use_smart_saving;
 
 =head2 get_all
 

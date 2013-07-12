@@ -1,5 +1,5 @@
 {
-   "abstract" : "Simple to use lightweight implementation of",
+   "abstract" : "Simple to use lightweight implementation of ActiveRecord pattern.",
    "author" : [
       "shootnix <shootnix@cpan.org>"
    ],
@@ -35,6 +35,7 @@
          "requires" : {
             "DBI" : 0,
             "Module::Load" : 0,
+            "Storable" : 0,
             "perl" : "5.010"
          }
       }
@@ -45,5 +46,5 @@
          "url" : "https://github.com/shootnix/activerecord-simple"
       }
    },
-   "version" : "0.32"
+   "version" : "0.33"
 }
