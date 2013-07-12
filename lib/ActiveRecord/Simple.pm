@@ -11,11 +11,11 @@ ActiveRecord pattern.
 
 =head1 VERSION
 
-Version 0.31
+Version 0.32
 
 =cut
 
-our $VERSION = '0.31';
+our $VERSION = '0.32';
 
 use utf8;
 use Encode;
@@ -452,11 +452,11 @@ sub order_by {
 }
 
 sub desc {
-    my ($self, @param) = @_;
+    my ($self) = @_;
 
     return if not defined $self->{prep_request_method};
 
-    $self->{prep_desc} = \@param;
+    $self->{prep_desc} = 1;
 
     return $self;
 }
@@ -466,7 +466,7 @@ sub asc {
 
     return if not defined $self->{prep_request_method};
 
-    $self->{prep_asc} = \@param;
+    $self->{prep_asc} = 1;
 
     return $self;
 }
@@ -527,7 +527,7 @@ sub _find_many_by_primary_keys {
 	    "$pkey" in ($whereinstr)
     };
 
-    $self->_add_result_ordering($sql_stmt) if defined $self->{prep_order_by};
+    $self->_add_result_ordering(\$sql_stmt) if defined $self->{prep_order_by};
 
     return $self->dbh->selectall_arrayref(
 	_quote_string($sql_stmt, $self->dbh->{Driver}{Name}),
@@ -726,11 +726,11 @@ ActiveRecord::Simple
 
 =head1 VERSION
 
-0.31
+0.32
 
 =head1 DESCRIPTION
 
-ActiveRecord::Simple is a simple lightweight implementation of ActiveRecord
+ActiveRecord::Simple is a simple lightweight implementation of ActiveRecord 
 pattern. It's fast, very simple and very light.
 
 =head1 SYNOPSIS
