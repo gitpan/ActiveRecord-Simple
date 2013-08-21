@@ -10,11 +10,11 @@ ActiveRecord::Simple - Simple to use lightweight implementation of ActiveRecord 
 
 =head1 VERSION
 
-Version 0.33
+Version 0.34
 
 =cut
 
-our $VERSION = '0.33';
+our $VERSION = '0.34';
 
 use utf8;
 use Encode;
@@ -22,15 +22,18 @@ use Module::Load;
 use Carp;
 use Storable qw/freeze/;
 
+use Data::Dumper;
+
 my $dbhandler = undef;
+my $TRACE     = defined $ENV{ACTIVE_RECORD_SIMPLE_TRACE} ? 1 : undef;
 
 sub new {
     my ($class, $param) = @_;
 
-    $class->_mk_accessors( $class->get_columns );
+    $class->_mk_accessors($class->get_columns());
 
-    if ( $class->can('get_relations') ) {
-        my $relations = $class->get_relations;
+    if ($class->can('get_relations')) {
+        my $relations = $class->get_relations();
 
 	no strict 'refs';
 
@@ -106,7 +109,7 @@ sub new {
         use strict 'refs';
     }
 
-    $param->{isin_database} = undef;
+    $class->use_smart_saving(0);
 
     return bless $param || {}, $class;
 }
@@ -148,6 +151,11 @@ sub _find_many_to_many {
         $param->{self}->{ $param->{root_class}->get_primary_key };
 
     my $container_class = $class->new();
+    do {
+        my $SQL_REQUEST = _quote_string($sql_stm, $class->dbh->{Driver}{Name});
+        carp $SQL_REQUEST;
+    } if $TRACE;
+
     my $resultset = $class->dbh->selectall_arrayref($sql_stm, { Slice => {} });
     my @bulk_objects;
     for my $params (@$resultset) {
@@ -175,7 +183,7 @@ sub _mk_accessors {
 	next FIELD if $class->can($pkg_accessor_name);
 	*{$pkg_accessor_name} = sub {
 	    if ( scalar @_ > 1 ) {
-		$_[0]->{$f} = $_[1];
+                $_[0]->{$f} = $_[1];
 
 		return $_[0];
 	    }
@@ -207,9 +215,11 @@ sub table_name {
 }
 
 sub use_smart_saving {
-    my ($class) = @_;
+    my ($class, $is_on) = @_;
 
-    $class->_mk_attribute_getter('is_smart_saving_turned_on', 1);
+    $is_on = 1 if not defined $is_on;
+
+    $class->_mk_attribute_getter('smart_saving_used', $is_on);
 }
 
 sub relations {
@@ -259,17 +269,16 @@ sub save {
 
     return unless $self->dbh;
 
+    return 1 if $self->smart_saving_used
+        and defined $self->{snapshoot}
+        and $self->{snapshoot} eq freeze $self->to_hash;
+
     my $save_param = {};
     my $fields = $self->get_columns;
     my $pkey;
     if ( $self->can('get_primary_key') ) {
         $pkey   = $self->get_primary_key;
     }
-
-    return 1 if defined $self->{snapshoot}
-                && $self->{snapshoot} eq freeze($self->to_hash);
-
-    #say 'SAVE!';
 
     FIELD:
     for my $field (@$fields) {
@@ -284,6 +293,7 @@ sub save {
     else {
         $result = $self->_insert($save_param);
     }
+    $self->{need_to_save} = 0 if $result;
 
     return $result;
 }
@@ -310,19 +320,25 @@ sub _insert {
         values ($values)
     };
 
-    if ( $self->dbh->{Driver}->{Name} eq 'Pg' ) {
+    if ( $self->dbh->{Driver}{Name} eq 'Pg' ) {
         $sql_stm .= ' returning ' . $primary_key if $primary_key;
 
+        do {
+            my $SQL_REQUEST = _quote_string($sql_stm, $self->dbh->{Driver}{Name});
+            carp $SQL_REQUEST
+        } if $TRACE;
+
 	$pkey_val = $self->dbh->selectrow_array(
-	    _quote_string($sql_stm, $self->dbh->{Driver}{Name}),
-	    undef,
-	    @bind
-	);
+            _quote_string($sql_stm, $self->dbh->{Driver}{name}),
+            undef, @bind
+        );
     }
     else {
-	my $sth = $self->dbh->prepare(
-	    _quote_string($sql_stm, $self->dbh->{Driver}{Name})
-	);
+        do {
+            my $SQL_REQUEST = _quote_string($sql_stm, $self->dbh->{Driver}{Name});
+            carp $SQL_REQUEST
+        } if $TRACE;
+	my $sth = $self->dbh->prepare(_quote_string($sql_stm, $self->dbh->{Driver}{Name}));
         $sth->execute(@bind);
 
 	if ( $primary_key && defined $self->{$primary_key} ) {
@@ -364,11 +380,15 @@ sub _update {
         where
             $primary_key = ?
     };
+    do {
+        my $SQL_REQUEST = _quote_string($sql_stm, $self->dbh->{Driver}{Name});
+        carp $SQL_REQUEST;
+    } if $TRACE;
 
     return $self->dbh->do(
-	_quote_string($sql_stm, $self->dbh->{Driver}{Name}),
-	undef,
-	@bind
+        _quote_string($sql_stm, $self->dbh->{Driver}{Name}),
+        undef,
+        @bind
     );
 }
 
@@ -390,6 +410,10 @@ sub delete {
 
     my $res = undef;
     my $driver_name = $self->dbh->{Driver}{Name};
+    do {
+        my $SQL_REQUEST = _quote_string($sql, $driver_name);
+        carp $SQL_REQUEST;
+    } if $TRACE;
     if ( $self->dbh->do(_quote_string($sql, $driver_name), undef, $self->{$pkey}) ) {
 	$self->{isin_database} = undef;
 	delete $self->{$pkey};
@@ -408,8 +432,7 @@ sub find {
         my $resultset = $self->_find_one_by_primary_key($param[0]);
 
         $self->_fill_params($resultset);
-        if ($self->can('is_smart_saving_turned_on') && $self->is_smart_saving_turned_on == 1) {
-            #say 'Yes!';
+        if ($self->smart_saving_used) {
             $self->{snapshoot} = freeze($resultset);
         }
 
@@ -439,12 +462,20 @@ sub fetch {
     return $self->_get($limit) if defined $self->{_objects};
 
     my $resultset = $self->_find_many_by_prepared_statement();
+
     my @bulk_objects;
     if (defined $resultset && ref $resultset eq 'ARRAY' && scalar @$resultset > 0) {
         my $class = ref $self;
         for my $object_data (@$resultset) {
-            my $obj = $class->new($object_data);
+            my $obj = $class->new();
+            $obj->_fill_params($object_data);
+
+            if ($obj->can('is_smart_saving_turned_on') && $obj->is_smart_saving_turned_on == 1) {
+                $obj->{snapshoot} = freeze($object_data);
+            }
+
             $obj->{isin_database} = 1;
+
             push @bulk_objects, $obj;
         }
     }
@@ -544,10 +575,14 @@ sub _find_many_by_primary_keys {
     };
 
     $self->_add_result_ordering(\$sql_stmt) if defined $self->{prep_order_by};
+    do {
+        my $SQL_REQUEST = _quote_string($sql_stmt, $self->dbh->{Driver}{Name});
+        carp $SQL_REQUEST;
+    } if $TRACE;
 
     return $self->dbh->selectall_arrayref(
-	_quote_string($sql_stmt, $self->dbh->{Driver}{Name}),
-	{ Slice => {} }
+        _quote_string($sql_stmt, $self->dbh->{Driver}{Name}),
+        { Slice => {} }
     );
 }
 
@@ -592,6 +627,11 @@ sub _find_many_by_condition {
 
     $self->_add_result_ordering(\$sql_stmt) if defined $self->{prep_order_by};
 
+    do {
+        my $SQL_REQUEST = _quote_string($sql_stmt, $self->dbh->{Driver}{Name});
+        carp $SQL_REQUEST;
+    } if $TRACE;
+
     return $self->dbh->selectall_arrayref(
 	_quote_string($sql_stmt, $self->dbh->{Driver}{Name}),
 	{ Slice => {} },
@@ -616,6 +656,11 @@ sub _find_many_by_params {
 
     $self->_add_result_ordering(\$sql_stmt) if defined $self->{prep_order_by};
 
+    do {
+        my $SQL_REQUEST = _quote_string($sql_stmt, $self->dbh->{Driver}{Name});
+        carp $SQL_REQUEST;
+    } if $TRACE;
+
     return $self->dbh->selectall_arrayref(
 	_quote_string($sql_stmt, $self->dbh->{Driver}{Name}),
 	{ Slice => {} },
@@ -639,6 +684,11 @@ sub _find_one_by_primary_key {
     };
 
     $self->_add_result_ordering(\$sql_stmt) if defined $self->{prep_order_by};
+
+    do {
+        my $SQL_REQUEST = _quote_string($sql_stmt, $self->dbh->{Driver}{Name});
+        carp $SQL_REQUEST;
+    } if $TRACE;
 
     return $self->dbh->selectrow_hashref(
 	_quote_string($sql_stmt, $self->dbh->{Driver}{Name}),
@@ -677,6 +727,11 @@ sub is_exists_in_database {
             $where_str
     };
 
+    do {
+        my $SQL_REQUEST = _quote_string($sql, $self->dbh->{Driver}{Name});
+        carp $SQL_REQUEST;
+    } if $TRACE;
+
     return $self->dbh->selectrow_array(
 	_quote_string($sql, $self->dbh->{Driver}{Name}),
 	undef,
@@ -705,6 +760,11 @@ sub get_all {
     my $sql_stmt = qq{
 	select $columns from "$table_name" order by "$pkey"
     };
+
+    do {
+        my $SQL_REQUEST = _quote_string($sql_stmt, $self->dbh->{Driver}{Name});
+        carp $SQL_REQUEST;
+    } if $TRACE;
 
     return $class->dbh->selectall_arrayref(
 	_quote_string($sql_stmt, $self->dbh->{Driver}{Name}),
@@ -807,7 +867,7 @@ That's it! Now you're ready to use your active-record class in the application:
 
 =head1 METHODS
 
-ActiveState::Simple provides a variety of techniques to make your work with
+ActiveRecord::Simple provides a variety of techniques to make your work with
 data little easier. It contains only a basic set of operations, such as
 search, create, update and delete data.
 
@@ -1060,6 +1120,12 @@ You can also specify how many objects you want to use:
 
     my @persons = MyModel::Person->find('id_person != ?', 1)->fetch(2);
     # fetching only 2 objects.
+
+=head1 TRACING QUERIES
+
+   use ACTIVE_RECORD_SIMPLE_TRACE=1 environment variable:
+
+   $ ACTIVE_RECORD_SIMPLE_TRACE=1 perl myscript.pl
 
 =head1 AUTHOR
 
