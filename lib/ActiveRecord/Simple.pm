@@ -10,19 +10,17 @@ ActiveRecord::Simple - Simple to use lightweight implementation of ActiveRecord 
 
 =head1 VERSION
 
-Version 0.34
+Version 0.40
 
 =cut
 
-our $VERSION = '0.34';
+our $VERSION = '0.40';
 
 use utf8;
 use Encode;
 use Module::Load;
 use Carp;
 use Storable qw/freeze/;
-
-use Data::Dumper;
 
 my $dbhandler = undef;
 my $TRACE     = defined $ENV{ACTIVE_RECORD_SIMPLE_TRACE} ? 1 : undef;
@@ -325,7 +323,8 @@ sub _insert {
 
         do {
             my $SQL_REQUEST = _quote_string($sql_stm, $self->dbh->{Driver}{Name});
-            carp $SQL_REQUEST
+            carp $SQL_REQUEST;
+            carp 'bind: ' . join q/, /, @bind;
         } if $TRACE;
 
 	$pkey_val = $self->dbh->selectrow_array(
@@ -336,7 +335,8 @@ sub _insert {
     else {
         do {
             my $SQL_REQUEST = _quote_string($sql_stm, $self->dbh->{Driver}{Name});
-            carp $SQL_REQUEST
+            carp $SQL_REQUEST;
+            carp 'bind: ' . join q/, /, @bind;
         } if $TRACE;
 	my $sth = $self->dbh->prepare(_quote_string($sql_stm, $self->dbh->{Driver}{Name}));
         $sth->execute(@bind);
@@ -383,6 +383,7 @@ sub _update {
     do {
         my $SQL_REQUEST = _quote_string($sql_stm, $self->dbh->{Driver}{Name});
         carp $SQL_REQUEST;
+        carp 'bind: ' . join q/, /, @bind;
     } if $TRACE;
 
     return $self->dbh->do(
@@ -428,29 +429,23 @@ sub find {
     my ($class, @param) = @_;
 
     my $self = $class->new();
-    if (scalar @param == 1 && ! ref $param[0]) {
-        my $resultset = $self->_find_one_by_primary_key($param[0]);
+    $self->{prep_request_method} = undef;
+    $self->{prep_request_params} = \@param;
 
-        $self->_fill_params($resultset);
-        if ($self->smart_saving_used) {
-            $self->{snapshoot} = freeze($resultset);
-        }
-
-        $self->{isin_database} = 1;
+    if (!ref $param[0] && scalar @param == 1) {
+        $self->{prep_request_method} = '_find_one_by_primary_key';
+    }
+    elsif (!ref $param[0] && scalar @param == 0) {
+        $self->{prep_request_method} = '_find_all';
+    }
+    elsif (ref $param[0] && ref $param[0] eq 'HASH') {
+        $self->{prep_request_method} = '_find_many_by_params';
+    }
+    elsif (ref $param[0] && ref $param[0] eq 'ARRAY') {
+        $self->{prep_request_method} = '_find_many_by_primary_keys';
     }
     else {
-        $self->{prep_request_method} = undef;
-        $self->{prep_request_params} = \@param;
-
-        if (ref $param[0] && ref $param[0] eq 'HASH') {
-            $self->{prep_request_method} = '_find_many_by_params';
-        }
-        elsif (ref $param[0] && ref $param[0] eq 'ARRAY') {
-            $self->{prep_request_method} = '_find_many_by_primary_keys';
-        }
-        else {
-            $self->{prep_request_method} = '_find_many_by_condition';
-        }
+        $self->{prep_request_method} = '_find_many_by_condition';
     }
 
     return $self;
@@ -459,7 +454,7 @@ sub find {
 sub fetch {
     my ($self, $limit) = @_;
 
-    return $self->_get($limit) if defined $self->{_objects};
+    return $self->_get_slice($limit) if defined $self->{_objects};
 
     my $resultset = $self->_find_many_by_prepared_statement();
 
@@ -470,7 +465,7 @@ sub fetch {
             my $obj = $class->new();
             $obj->_fill_params($object_data);
 
-            if ($obj->can('is_smart_saving_turned_on') && $obj->is_smart_saving_turned_on == 1) {
+            if ($obj->smart_saving_used) {
                 $obj->{snapshoot} = freeze($object_data);
             }
 
@@ -479,13 +474,22 @@ sub fetch {
             push @bulk_objects, $obj;
         }
     }
+    elsif (defined $resultset && ref $resultset eq 'HASH') {
+        #$self->_fill_params($resultset);
+        my $class = ref $self;
+        my $obj = $class->new();
+        $obj->_fill_params($resultset);
+        $obj->{isin_database} = 1;
+
+        push @bulk_objects, $obj;
+    }
     else {
         push @bulk_objects, $self;
     }
 
     $self->{_objects} = \@bulk_objects;
 
-    $self->_get($limit);
+    $self->_get_slice($limit);
 }
 
 sub order_by {
@@ -518,7 +522,27 @@ sub asc {
     return $self;
 }
 
-sub _get {
+sub limit {
+    my ($self, $limit) = @_;
+
+    return if not defined $self->{prep_request_method};
+
+    $self->{prep_limit} = $limit;
+
+    return $self;
+}
+
+sub offset {
+    my ($self, $offset) = @_;
+
+    return if not defined $self->{prep_request_method};
+
+    $self->{prep_offset} = $offset;
+
+    return $self;
+}
+
+sub _get_slice {
     my ($self, $time) = @_;
 
     return unless $self->{_objects} && ref $self->{_objects} eq 'ARRAY';
@@ -559,6 +583,27 @@ sub _find_many_by_prepared_statement {
     return $resultset;
 }
 
+sub _find_all {
+    my ($self) = @_;
+
+    my $table_name = $self->get_table_name;
+    my $sql_stmt = qq{
+        select * from "$table_name"
+    };
+
+    $self->_finish_sql_stmt(\$sql_stmt);
+    do {
+        my $SQL_REQUEST = _quote_string($sql_stmt, $self->dbh->{Driver}{Name});
+        carp $SQL_REQUEST;
+    } if $TRACE;
+
+    return
+        $self->dbh->selectall_arrayref(
+            _quote_string($sql_stmt, $self->dbh->{Driver}{Name}),
+            { Slice => {} }
+        );
+}
+
 sub _find_many_by_primary_keys {
     my ($self, $pkeyvals) = @_;
 
@@ -569,24 +614,25 @@ sub _find_many_by_primary_keys {
     my $whereinstr = join ', ', @$pkeyvals;
 
     my $sql_stmt = qq{
-	select * from "$table_name"
-	where
-	    "$pkey" in ($whereinstr)
+	    select * from "$table_name"
+	    where
+	        "$pkey" in ($whereinstr)
     };
 
-    $self->_add_result_ordering(\$sql_stmt) if defined $self->{prep_order_by};
+    $self->_finish_sql_stmt(\$sql_stmt);
     do {
         my $SQL_REQUEST = _quote_string($sql_stmt, $self->dbh->{Driver}{Name});
         carp $SQL_REQUEST;
     } if $TRACE;
 
-    return $self->dbh->selectall_arrayref(
-        _quote_string($sql_stmt, $self->dbh->{Driver}{Name}),
-        { Slice => {} }
-    );
+    return
+        $self->dbh->selectall_arrayref(
+            _quote_string($sql_stmt, $self->dbh->{Driver}{Name}),
+            { Slice => {} }
+        );
 }
 
-sub _add_result_ordering {
+sub _finish_sql_stmt {
     my ($self, $sql_stmt) = @_;
 
     if (defined $self->{prep_order_by}) {
@@ -600,6 +646,14 @@ sub _add_result_ordering {
 
     if (defined $self->{prep_asc}) {
         $$sql_stmt .= ' asc';
+    }
+
+    if (defined $self->{prep_limit}) {
+        $$sql_stmt .= ' limit ' . $self->{prep_limit};
+    }
+
+    if (defined $self->{prep_offset}) {
+        $$sql_stmt .= ' offset ' . $self->{prep_offset};
     }
 
     $self->_delete_keys(qr/^prep\_/);
@@ -625,11 +679,12 @@ sub _find_many_by_condition {
             $wherestr
     };
 
-    $self->_add_result_ordering(\$sql_stmt) if defined $self->{prep_order_by};
+    $self->_finish_sql_stmt(\$sql_stmt);
 
     do {
         my $SQL_REQUEST = _quote_string($sql_stmt, $self->dbh->{Driver}{Name});
         carp $SQL_REQUEST;
+        carp 'bind: ' . join q/, /, @param;
     } if $TRACE;
 
     return $self->dbh->selectall_arrayref(
@@ -645,7 +700,7 @@ sub _find_many_by_params {
     return unless $self->dbh && $param;
 
     my $table_name = $self->get_table_name;
-    my $where_str = join q/ and /, map { q/"/ . $_ . q/"/ .' = ?' } sort keys %$param;
+    my $where_str = join q/ and /, map { q/"/ . $_ . q/"/ .' = ?' } keys %$param;
     my @bind = values %$param;
 
     my $sql_stmt = qq{
@@ -654,11 +709,12 @@ sub _find_many_by_params {
             $where_str
     };
 
-    $self->_add_result_ordering(\$sql_stmt) if defined $self->{prep_order_by};
+    $self->_finish_sql_stmt(\$sql_stmt);
 
     do {
         my $SQL_REQUEST = _quote_string($sql_stmt, $self->dbh->{Driver}{Name});
         carp $SQL_REQUEST;
+        carp 'bind: ' . join q/, /, @bind;
     } if $TRACE;
 
     return $self->dbh->selectall_arrayref(
@@ -683,7 +739,7 @@ sub _find_one_by_primary_key {
             "$pkey" = ?
     };
 
-    $self->_add_result_ordering(\$sql_stmt) if defined $self->{prep_order_by};
+    $self->_finish_sql_stmt(\$sql_stmt);
 
     do {
         my $SQL_REQUEST = _quote_string($sql_stmt, $self->dbh->{Driver}{Name});
@@ -730,46 +786,25 @@ sub is_exists_in_database {
     do {
         my $SQL_REQUEST = _quote_string($sql, $self->dbh->{Driver}{Name});
         carp $SQL_REQUEST;
+        carp 'bind: ' . join q/, /, @bind;
     } if $TRACE;
 
     return $self->dbh->selectrow_array(
-	_quote_string($sql, $self->dbh->{Driver}{Name}),
-	undef,
-	@bind
+	    _quote_string($sql, $self->dbh->{Driver}{Name}),
+	    undef,
+	    @bind
     );
 }
 
-# attrs:
-#     table fields
-sub get_all {
-    my ($class, $attrs) = @_;
+sub get {
+    my ($class, $pkeyval) = @_;
 
+    #my $resultset = $class->_find_one_by_primary_key($pkeyval);
     my $self = $class->new();
+    my $resultset = $self->_find_one_by_primary_key($pkeyval);
+    $self->_fill_params($resultset);
 
-    my $columns;
-    if ( $attrs && ref $attrs eq 'ARRAY' && scalar @$attrs ) {
-	$columns = join ', ', map { q/"/.$_.q/"/ } @$attrs;
-    }
-    else {
-	$columns = '*';
-    }
-
-    my $table_name = $self->get_table_name;
-    my $pkey = $self->get_primary_key;
-
-    my $sql_stmt = qq{
-	select $columns from "$table_name" order by "$pkey"
-    };
-
-    do {
-        my $SQL_REQUEST = _quote_string($sql_stmt, $self->dbh->{Driver}{Name});
-        carp $SQL_REQUEST;
-    } if $TRACE;
-
-    return $class->dbh->selectall_arrayref(
-	_quote_string($sql_stmt, $self->dbh->{Driver}{Name}),
-	{ Slice => {} }
-    );
+    return $self;
 }
 
 # param:
@@ -793,6 +828,14 @@ sub to_hash {
     return $attrs;
 }
 
+sub DESTROY {
+    my ($self) = @_;
+
+    if ($self->smart_saving_used) {
+        $self->save() if not exists $self->{'_objects'};
+    }
+}
+
 1;
 
 __END__;
@@ -803,7 +846,7 @@ ActiveRecord::Simple
 
 =head1 VERSION
 
-0.33
+0.40
 
 =head1 DESCRIPTION
 
@@ -833,7 +876,7 @@ That's it! Now you're ready to use your active-record class in the application:
     $person->name('Bar')->save();
 
     # to find a record (by primary key):
-    my $person = MyModel::Person->find(1);
+    my $person = MyModel::Person->get(1);
 
     # to find many records by parameters:
     my @persons = MyModel::Person->find({ name => 'Foo' })->fetch();
@@ -940,8 +983,13 @@ just keep this simple schema in youre mind:
 
 =head2 use_smart_saving
 
-Check the changes of object's data before saving in the database. Won't save
-if data didn't change.
+This method provides two features:
+
+   1. Check the changes of object's data before saving in the database.
+      Won't save if data didn't change.
+
+   2. Automatic save on object destroy (You don't need use "save()" method
+      anymore).
 
     __PACKAGE__->use_smart_saving;
 
@@ -959,26 +1007,21 @@ You also may specify which rows you want to use:
 
 There are several ways to find someone in your database using ActiveRecord::Simple:
 
+    # by "nothing"
+    # just leave attributes blank to recieve all rows from the database:
+    my @all_persons = MyModel::Person->find()->fetch;
+
     # by primary key:
-    my $person = MyModel::Person->find(1);
+    my $person = MyModel::Person->find(1)->fetch;
 
     # by multiple primary keys
-    my @persons = MyModel::Person->find([1, 2, 5])->fetch();
+    my @persons = MyModel::Person->find([1, 2, 5])->fetch;
 
     # by simple condition:
-    my @persons = MyModel::Person->find({ name => 'Foo' })->fetch();
+    my @persons = MyModel::Person->find({ name => 'Foo' })->fetch;
 
     # by where-condtions:
     my @persons = MyModel::Person->find('first_name = ? and id_person > ?', 'Foo', 1);
-
-If you want to get an instance of your active-record class and if you know the
-primary key, you can do it, just put the primary key as a parameter into the
-find method:
-
-    my $person = MyModel::Person->find(1);
-
-In this case, you will get only one instance (because can't be more than one rows
-in the table with the same values of the primary key).
 
 If you want to get a few instances by primary keys, you should put it as arrayref,
 and then fetch from resultset:
@@ -1010,6 +1053,14 @@ You can use the ordering of results, such as ORDER BY, ASC and DESC:
     my @persons = MyModel::Person->find('age > ?', 21)->order_by('name')->desc->fetch();
     my @persons = MyModel::Person->find('age > ?', 21)->order_by('name', 'age')->fetch();
 
+=head2 get
+
+This is shortcut method for "find":
+
+    my $person = MyModel::Person->get(1);
+    ### is the same:
+    my $person = MyModel::Person->find(1)->fetch;
+
 =head2 order_by
 
 Order your results by specified fields:
@@ -1032,6 +1083,18 @@ Use this attribute to order your results ascending:
 Use this attribute to order your results ascending:
 
     MyModel::Person->find([1, 3, 5, 2])->order_by('id')->desc->fetch();
+
+=head2 limit
+
+Use this attribute to limit results of your requests:
+
+    MyModel::Person->find()->limit(10)->fetch; # select only 10 rows
+
+=head2 offset
+
+Offset of results:
+
+    MyModel::Person->find()->offset(10)->fetch; # all next after 10 rows
 
 =head2 dbh
 

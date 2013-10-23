@@ -30,6 +30,8 @@ __PACKAGE__->use_smart_saving;
 
 1;
 
+package t::class3;
+
 package MockDBI;
 
 sub selectrow_array { 1 }
@@ -38,7 +40,7 @@ sub selectrow_hashref { { DUMMY => 'hash' } }
 sub prepare { bless {}, 'MockDBI' }
 sub execute { 1 }
 sub last_insert_id { 1 }
-sub selectall_arrayref { [qw/dummy array/] }
+sub selectall_arrayref { [{ foo => 1  }, { bar => 2 }] }
 
 1;
 
@@ -64,18 +66,23 @@ ok $c->save(), 'update in database ok';
 ok my $c2 = t::class->find(1), 'find, primary key';
 isa_ok $c2, 't::class';
 
+ok my $c21 = t::class->get(1), 'get';
+isa_ok $c21, 't::class';
+
 ok my $c3 = t::class->find({ foo => 'bar' }), 'find, params';
 isa_ok $c3, 't::class';
 
 ok my $c4 = t::class->find([1, 2, 3]), 'find, primary keys';
 isa_ok $c4, 't::class';
 
+ok my @fetched = $c4->fetch(), 'fetch';
+is scalar @fetched, 2;
+isa_ok $fetched[0], 't::class';
+is $fetched[0]->foo, 1;
+
+
 ok my $c5 = t::class->find('foo = ?', 'bar'), 'find, binded params';
 isa_ok $c5, 't::class';
-
-ok my $all = t::class->get_all(), 'get_all';
-is ref $all, 'ARRAY';
-is $all->[0], 'dummy';
 
 is ref $c->to_hash, 'HASH', 'to_hash';
 ok $c->smart_saving_used == 0, 'no use smart saving';
