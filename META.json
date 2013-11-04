@@ -4,7 +4,7 @@
       "shootnix <shootnix@cpan.org>"
    ],
    "dynamic_config" : 1,
-   "generated_by" : "ExtUtils::MakeMaker version 6.64, CPAN::Meta::Converter version 2.112621",
+   "generated_by" : "ExtUtils::MakeMaker version 6.64, CPAN::Meta::Converter version 2.132830",
    "license" : [
       "perl_5"
    ],
@@ -22,20 +22,20 @@
    "prereqs" : {
       "build" : {
          "requires" : {
-            "ExtUtils::MakeMaker" : 0,
-            "Test::More" : 0
+            "ExtUtils::MakeMaker" : "0",
+            "Test::More" : "0"
          }
       },
       "configure" : {
          "requires" : {
-            "ExtUtils::MakeMaker" : 0
+            "ExtUtils::MakeMaker" : "0"
          }
       },
       "runtime" : {
          "requires" : {
-            "DBI" : 0,
-            "Module::Load" : 0,
-            "Storable" : 0,
+            "DBI" : "0",
+            "Module::Load" : "0",
+            "Storable" : "0",
             "perl" : "5.010"
          }
       }
@@ -46,5 +46,5 @@
          "url" : "https://github.com/shootnix/activerecord-simple"
       }
    },
-   "version" : "0.41"
+   "version" : "0.50"
 }
