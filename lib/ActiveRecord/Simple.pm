@@ -10,11 +10,11 @@ ActiveRecord::Simple - Simple to use lightweight implementation of ActiveRecord 
 
 =head1 VERSION
 
-Version 0.50
+Version 0.51
 
 =cut
 
-our $VERSION = '0.50';
+our $VERSION = '0.51';
 
 use utf8;
 use Encode;
@@ -156,12 +156,10 @@ sub _find_many_to_many {
         $param->{self}->{ $param->{root_class}->_get_primary_key };
 
     my $container_class = $class->new();
-    do {
-        my $SQL_REQUEST = _quote_string($sql_stm, $class->dbh->{Driver}{Name});
-        carp $SQL_REQUEST;
-    } if $TRACE;
+    my $self = bless {}, $class;
+    $self->{SQL} = $sql_stm; $self->_quote_sql_stmt; say $self->{SQL} if $TRACE;
 
-    my $resultset = $class->dbh->selectall_arrayref($sql_stm, { Slice => {} });
+    my $resultset = $class->dbh->selectall_arrayref($self->{SQL}, { Slice => {} });
     my @bulk_objects;
     for my $params (@$resultset) {
         my $obj = $class->new($params);
@@ -251,20 +249,83 @@ sub dbh {
     return $dbhandler;
 }
 
-sub _quote_string {
-    my ($string, $driver_name) = @_;
+sub count {
+    my ($class, @param) = @_;
 
+    my $self = bless {}, $class;
+    my $table_name = $class->_get_table_name;
+    my ($count, $sql, @bind);
+    if (scalar @param == 0) {
+        $self->{SQL} = qq/select count(*) from "$table_name"/;
+    }
+    elsif (scalar @param == 1) {
+        my $params_hash = shift @param;
+        return unless ref $params_hash eq 'HASH';
+
+        my $wherestr = join q/ and /, map { q/"/ . $_ . q/"/ .' = ?' } keys %{ $params_hash };
+        @bind = values %{ $params_hash };
+        $self->{SQL} = qq/select count(*) from "$table_name" where $wherestr/;
+    }
+    elsif (scalar @param > 1) {
+        my $wherestr = shift @param;
+        @bind = @param;
+
+        $self->{SQL} = qq/select count(*) from "$table_name" where $wherestr/;
+    }
+    $self->_quote_sql_stmt;
+    $count = $self->dbh->selectrow_array($self->{SQL}, undef, @bind);
+
+    return $count;
+}
+
+sub exists {
+    my ($ref, @params) = @_;
+
+    if (ref $ref) {
+        ### object method
+        return $ref->_is_exists_in_database;
+    }
+    # else
+    return $ref->find(@params)->fetch->is_defined;
+}
+
+sub first {
+    my ($class, $limit) = @_;
+
+    $class->can('_get_primary_key') or croak 'Can\'t use "first" without primary key';
+    my $primary_key = $class->_get_primary_key;
+    $limit //= 1;
+
+    return $class->find->order_by($primary_key)->limit($limit);
+}
+
+sub last {
+    my ($class, $limit) = @_;
+
+    $class->can('_get_primary_key') or croak 'Can\'t use "first" without primary key';
+    my $primary_key = $class->_get_primary_key;
+    $limit //= 1;
+
+    return $class->find->order_by($primary_key)->desc->limit($limit);
+}
+
+sub _quote_sql_stmt {
+    my ($self) = @_;
+
+    return unless $self->{SQL} && $self->dbh;
+
+    my $driver_name = $self->dbh->{Driver}{Name};
     $driver_name //= 'Pg';
     my $quotes_map = {
-        Pg     => q/"/,
-	    mysql  => q/`/,
-	    SQLite => q/`/,
+        Pg => q/"/,
+        mysql => q/`/,
+        SQLite => q/`/,
     };
     my $quote = $quotes_map->{$driver_name};
 
-    $string =~ s/"/$quote/g;
+    $self->{SQL} =~ s/"/$quote/g;
 
-    return $string;
+    return 1;
 }
 
 sub save {
@@ -275,6 +336,9 @@ sub save {
     return 1 if $self->_smart_saving_used
         and defined $self->{snapshoot}
         and $self->{snapshoot} eq freeze $self->to_hash;
+
+    croak 'Object is read-only'
+        if exists $self->{read_only} && $self->{read_only} == 1;
 
     my $save_param = {};
     my $fields = $self->_get_columns;
@@ -319,25 +383,12 @@ sub _insert {
 
     if ( $self->dbh->{Driver}{Name} eq 'Pg' ) {
         $sql_stm .= ' returning ' . $primary_key if $primary_key;
-
-        do {
-            my $SQL_REQUEST = _quote_string($sql_stm, $self->dbh->{Driver}{Name});
-            carp $SQL_REQUEST;
-            carp 'bind: ' . join q/, /, @bind;
-        } if $TRACE;
-
-	    $pkey_val = $self->dbh->selectrow_array(
-            _quote_string($sql_stm, $self->dbh->{Driver}{name}),
-            undef, @bind
-        );
+        $self->{SQL} = $sql_stm; $self->_quote_sql_stmt; say $self->{SQL} if $TRACE;
+	    $pkey_val = $self->dbh->selectrow_array($self->{SQL}, undef, @bind);
     }
     else {
-        do {
-            my $SQL_REQUEST = _quote_string($sql_stm, $self->dbh->{Driver}{Name});
-            carp $SQL_REQUEST;
-            carp 'bind: ' . join q/, /, @bind;
-        } if $TRACE;
-	    my $sth = $self->dbh->prepare(_quote_string($sql_stm, $self->dbh->{Driver}{Name}));
+        $self->{SQL} = $sql_stm; $self->_quote_sql_stmt(); say $self->{SQL} if $TRACE;
+	    my $sth = $self->dbh->prepare($self->{SQL});
         $sth->execute(@bind);
 
 	    if ( $primary_key && defined $self->{$primary_key} ) {
@@ -374,17 +425,9 @@ sub _update {
         where
             $primary_key = ?
     };
-    do {
-        my $SQL_REQUEST = _quote_string($sql_stm, $self->dbh->{Driver}{Name});
-        carp $SQL_REQUEST;
-        carp 'bind: ' . join q/, /, @bind;
-    } if $TRACE;
+    $self->{SQL} = $sql_stm; $self->_quote_sql_stmt; say $self->{SQL} if $TRACE;
 
-    return $self->dbh->do(
-        _quote_string($sql_stm, $self->dbh->{Driver}{Name}),
-        undef,
-        @bind
-    );
+    return $self->dbh->do($self->{SQL}, undef, @bind);
 }
 
 # param:
@@ -404,12 +447,8 @@ sub delete {
     $sql .= ' cascade ' if $param && $param->{cascade};
 
     my $res = undef;
-    my $driver_name = $self->dbh->{Driver}{Name};
-    do {
-        my $SQL_REQUEST = _quote_string($sql, $driver_name);
-        carp $SQL_REQUEST;
-    } if $TRACE;
-    if ( $self->dbh->do(_quote_string($sql, $driver_name), undef, $self->{$pkey}) ) {
+    $self->{SQL} = $sql; $self->_quote_sql_stmt; say $self->{SQL} if $TRACE;
+    if ( $self->dbh->do($self->{SQL}, undef, $self->{$pkey}) ) {
 	    $self->{isin_database} = undef;
 	    delete $self->{$pkey};
 
@@ -429,88 +468,103 @@ sub find {
 
     if (!ref $param[0] && scalar @param == 1) {
         # find one by primary key
-        my $sql_stmt = qq{
+        $self->{SQL} = qq{
             select * from "$table_name"
                 where
                     "$pkey" = ?
         };
-
-        $self->{'SQL'}  = _quote_string($sql_stmt, $self->dbh->{Driver}{Name});
-        $self->{'BIND'} = \@param
+        $self->{BIND} = \@param
     }
     elsif (!ref $param[0] && scalar @param == 0) {
         # find all
-        my $sql_stmt = qq{
+        $self->{SQL} = qq{
             select * from "$table_name"
         };
-
-        $self->{'SQL'}  = _quote_string($sql_stmt, $self->dbh->{Driver}{Name});
-        $self->{'BIND'} = undef;
+        $self->{BIND} = undef;
     }
     elsif (ref $param[0] && ref $param[0] eq 'HASH') {
         # find many by params
         my $where_str = join q/ and /, map { q/"/ . $_ . q/"/ .' = ?' } keys %{ $param[0] };
         my @bind = values %{ $param[0] };
 
-        my $sql_stmt = qq{
+        $self->{SQL} = qq{
             select * from "$table_name"
             where
                 $where_str
         };
-
-        $self->{'SQL'}  = _quote_string($sql_stmt, $self->dbh->{Driver}{Name});
-        $self->{'BIND'} = \@bind;
+        $self->{BIND} = \@bind;
     }
     elsif (ref $param[0] && ref $param[0] eq 'ARRAY') {
         # find many by primary keys
         my $whereinstr = join ', ', @{ $param[0] };
 
-        my $sql_stmt = qq{
+        $self->{SQL} = qq{
             select * from "$table_name"
             where
                 "$pkey" in ($whereinstr)
         };
-
-        $self->{'SQL'}  = _quote_string($sql_stmt, $self->dbh->{Driver}{Name});
-        $self->{'BIND'} = undef;
+        $self->{BIND} = undef;
     }
     else {
         # find many by condition
         my $wherestr = shift @param;
-        my $sql_stmt = qq{
+        $self->{SQL} = qq{
             select * from "$table_name"
             where
                 $wherestr
         };
-
-        $self->{'SQL'}  = _quote_string($sql_stmt, $self->dbh->{Driver}{Name});
-        $self->{'BIND'} = \@param;
+        $self->{BIND} = \@param;
     }
 
     return $self;
 }
 
+sub only {
+    my ($self, @fields) = @_;
+
+    scalar @fields > 0 or croak 'Not defined fields for method "only"';
+    exists $self->{SQL} or croak 'Not executed method "find" before "only"';
+
+    if ($self->can('_get_primary_key')) {
+        push @fields, $self->_get_primary_key;
+    }
+
+    my $fields_str = join q/, /, map { q/"/ . $_ . q/"/ } @fields;
+    $self->{SQL} =~ s/\*/$fields_str/;
+
+    return $self;
+}
+
 sub fetch {
-    my ($self, $limit) = @_;
+    my ($self, $param) = @_;
+
+    my ($read_only, $limit);
+    if (ref $param eq 'HASH') {
+        $limit     = $param->{limit};
+        $read_only = $param->{read_only};
+    }
+    else {
+        $limit = $param;
+    }
 
     if (not exists $self->{_objects}) {
         $self->_finish_sql_stmt();
+        $self->_quote_sql_stmt();
+        say $self->{SQL} if $TRACE;
 
         my @objects;
         my $resultset =
             $self->dbh->selectall_arrayref(
-                $self->{'SQL'},
+                $self->{SQL},
                 { Slice => {} },
-                @{ $self->{'BIND'}
-            });
+                @{ $self->{BIND}}
+            );
 
         if (defined $resultset && ref $resultset eq 'ARRAY' && scalar @$resultset > 0) {
             my $class = ref $self;
             for my $object_data (@$resultset) {
-                #my $obj = $class->new();
-                #$obj->_fill_params($object_data);
                 my $obj = bless $object_data, $class;
-
+                $obj->{read_only} = 1 if defined $read_only;
                 $obj->{snapshoot} = freeze($object_data) if $obj->_smart_saving_used;
                 $obj->{isin_database} = 1;
 
@@ -547,6 +601,7 @@ sub order_by {
     my ($self, @param) = @_;
 
     return if not defined $self->{SQL};
+    return $self if exists $self->{prep_order_by};
 
     $self->{prep_order_by} = \@param;
 
@@ -557,6 +612,7 @@ sub desc {
     my ($self) = @_;
 
     return if not defined $self->{SQL};
+    return $self if exists $self->{prep_desc};
 
     $self->{prep_desc} = 1;
 
@@ -567,6 +623,7 @@ sub asc {
     my ($self, @param) = @_;
 
     return if not defined $self->{SQL};
+    return $self if exists $self->{prep_asc};
 
     $self->{prep_asc} = 1;
 
@@ -577,6 +634,7 @@ sub limit {
     my ($self, $limit) = @_;
 
     return if not defined $self->{SQL};
+    return $self if exists $self->{prep_limit};
 
     $self->{prep_limit} = $limit;
 
@@ -587,24 +645,12 @@ sub offset {
     my ($self, $offset) = @_;
 
     return if not defined $self->{SQL};
+    return $self if exists $self->{prep_offset};
 
     $self->{prep_offset} = $offset;
 
     return $self;
 }
-
-#sub _fill_params {
-#    my ($self, $params) = @_;
-#
-#    return unless $params;
-#
-#    FIELD:
-#    for my $field ( sort keys %$params ) {
-#        $self->{$field} = $params->{$field};
-#    }
-#
-#    return $self;
-#}
 
 sub _finish_sql_stmt {
     my ($self) = @_;
@@ -642,13 +688,12 @@ sub _delete_keys {
 sub is_defined {
     my ($self) = @_;
 
-    #return keys %{ $self->to_hash };
     return grep { defined $self->{$_} } @{ $self->_get_columns };
 }
 
 # param:
 #      name => .., id => .., <something_else> => ...
-sub is_exists_in_database {
+sub _is_exists_in_database {
     my ($self, $param) = @_;
 
     return unless $self->dbh;
@@ -662,25 +707,15 @@ sub is_exists_in_database {
     for my $f (@fields) {
         push @bind, $self->$f;
     }
-    #= values %$param;
 
     my $sql = qq{
         select 1 from "$table_name"
         where
             $where_str
     };
+    $self->{SQL} = $sql; $self->_quote_sql_stmt; say $self->{SQL} if $TRACE;
 
-    do {
-        my $SQL_REQUEST = _quote_string($sql, $self->dbh->{Driver}{Name});
-        carp $SQL_REQUEST;
-        carp 'bind: ' . join q/, /, @bind;
-    } if $TRACE;
-
-    return $self->dbh->selectrow_array(
-	    _quote_string($sql, $self->dbh->{Driver}{Name}),
-	    undef,
-	    @bind
-    );
+    return $self->dbh->selectrow_array($self->{SQL}, undef, @bind);
 }
 
 sub get {
@@ -710,14 +745,6 @@ sub to_hash {
     return $attrs;
 }
 
-sub DESTROY {
-    my ($self) = @_;
-
-    if ($self->_smart_saving_used) {
-        $self->save() if not exists $self->{'_objects'};
-    }
-}
-
 1;
 
 __END__;
@@ -728,7 +755,7 @@ ActiveRecord::Simple
 
 =head1 VERSION
 
-0.50
+0.51
 
 =head1 DESCRIPTION
 
@@ -759,6 +786,9 @@ That's it! Now you're ready to use your active-record class in the application:
 
     # to get the record (using primary key):
     my $person = MyModel::Person->get(1);
+
+    # to get the record with specified fields:
+    my $person = MyModel::Person->find(1)->only('name', 'age')->fetch;
 
     # to find records by parameters:
     my @persons = MyModel::Person->find({ name => 'Foo' })->fetch();
@@ -876,16 +906,6 @@ This method provides two features:
 
     __PACKAGE__->use_smart_saving;
 
-=head2 get_all
-
-You can get a whole table as an arrayref of hashref's:
-
-    my $table = Person->get_all();
-
-You also may specify which rows you want to use:
-
-    my $table = Person->get_all(['name']);
-
 =head2 find
 
 There are several ways to find someone in your database using ActiveRecord::Simple:
@@ -936,6 +956,62 @@ You can use the ordering of results, such as ORDER BY, ASC and DESC:
     my @persons = MyModel::Person->find('age > ?', 21)->order_by('name')->desc->fetch();
     my @persons = MyModel::Person->find('age > ?', 21)->order_by('name', 'age')->fetch();
 
+=head2 count
+
+Returns count of records that match the rule:
+
+    say MyModel::Person->count;
+    say MyModel::Person->count({ zip => '12345' });
+    say MyModel::Person->count('age > ?', 55);
+
+=head2 exists
+
+Returns 1 if record is exists in database:
+
+    say "Exists" if MyModel::Person->exists({ zip => '12345' });
+    say "Exists" if MyModel::Person->exists('age > ?', 55);
+
+=head2 first
+
+Returns the first record (records) ordered by the primary key:
+
+    my $first_person = MyModel::Person->first->fetch;
+    my @ten_persons  = MyModel::Person->first(10)->fetch;
+
+=head2 last
+
+Returns the last record (records) ordered by the primary key:
+
+    my $last_person = MyModel::Person->last->fetch;
+    my @ten_persons = MyModel::Person->last(10)->fetch;
+
+=head2 dbh
+
+Keeps a database connection handler. It's not a class method actually, this is
+an attribute of the base class and you can put your database handler in any
+class:
+
+    Person->dbh($dbh);
+
+Or even rigth in base class:
+
+    ActiveRecord::Simple->dbh($dht);
+
+This decision is up to you. Anyway, this is a singleton value, and keeps only
+once at the session.
+
+=head1 Object Methods
+
+Object methods usefull to manipulating single rows as a separate objects.
+
+=head2 only
+
+Get only those fields that are needed:
+
+    my $person = MyModel::Person->find({ name => 'Alex' })->only('address', 'email')->fetch;
+    ### SQL:
+    ###     SELECT `address`, `email` from `persons` where `name` = "Alex";
+
 =head2 get
 
 This is shortcut method for "find":
@@ -979,25 +1055,6 @@ Offset of results:
 
     MyModel::Person->find()->offset(10)->fetch; # all next after 10 rows
 
-=head2 dbh
-
-Keeps a database connection handler. It's not a class method actually, this is
-an attribute of the base class and you can put your database handler in any
-class:
-
-    Person->dbh($dbh);
-
-Or even rigth in base class:
-
-    ActiveRecord::Simple->dbh($dht);
-
-This decision is up to you. Anyway, this is a singleton value, and keeps only
-once at the session.
-
-=head1 Object Methods
-
-Object methods usefull to manipulating single rows as a separate objects.
-
 =head2 save
 
 To insert or update data in the table, use only one method. It detects
@@ -1028,7 +1085,7 @@ If you took the object using the find method, "save" will mean "update".
 
 Delete row from the table.
 
-=head2 is_exists_in_database
+=head2 exists
 
 Checks for a record in the database corresponding to the object:
 
@@ -1037,7 +1094,7 @@ Checks for a record in the database corresponding to the object:
         secnd_name => 'Bar',
     });
 
-    $person->save() unless $person->is_exists_in_database;
+    $person->save() unless $person->exists;
 
 =head2 to_hash
 
@@ -1062,16 +1119,29 @@ use the "fetch" method:
 
     my @persons = MyModel::Person->find('id_person != ?', 1)->fetch();
 
-You can also specify how many objects you want to use:
+You can also specify how many objects you want to use at a time:
 
     my @persons = MyModel::Person->find('id_person != ?', 1)->fetch(2);
     # fetching only 2 objects.
+
+Another syntax of command "fetch" allows you to make read-only objects:
+
+    my @persons = MyModel::Person->find->fetch({ read_only => 1, limit => 2 });
+    # all two object are read-only
 
 =head1 TRACING QUERIES
 
    use ACTIVE_RECORD_SIMPLE_TRACE=1 environment variable:
 
    $ ACTIVE_RECORD_SIMPLE_TRACE=1 perl myscript.pl
+
+=head1 SEE ALSO
+
+    DBIx::ActiveRecord
+
+=head1 MORE INFO
+
+    perldoc ActiveRecord::Simple::Tutorial
 
 =head1 AUTHOR
 

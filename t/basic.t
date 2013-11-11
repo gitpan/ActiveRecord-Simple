@@ -118,4 +118,25 @@ ok $total_sql->{SQL} =~ /desc/i, 'use all predicats, find "desc"';
 
 ok $c->delete(), 'delete';
 
+ok my $c6 = t::class->find->only('foo', 'bar'), 'find only "foo"';
+ok $c6->{SQL} =~ /select "foo"/;
+
+my $r;
+ok $r = t::class->first, 'first';
+is $r->{prep_limit}, 1, 'limit is 1, first ok';
+is shift @{ $r->{prep_order_by} }, t::class->_get_primary_key, 'order by ok';
+
+ok $r = t::class->first(10), 'first 10';
+is $r->{prep_limit}, 10, 'limit is 10, first ok';
+
+ok $r = t::class->last, 'last';
+is $r->{prep_limit}, 1, 'limit is 1, first ok';
+is shift @{ $r->{prep_order_by} }, t::class->_get_primary_key, 'order by ok';
+is $r->{prep_desc}, 1, 'desc, ok';
+
+ok $r = t::class->last(10), 'last 10';
+is $r->{prep_limit}, 10, 'limit is 10, last ok';
+
+ok( t::class->exists({ foo => 'bar' }), 'exists' );
+
 done_testing();

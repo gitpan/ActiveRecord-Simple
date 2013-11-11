@@ -1,9 +1,11 @@
 Changes
 lib/ActiveRecord/Simple.pm
+lib/ActiveRecord/Simple/Tutorial.pm
 Makefile.PL
 MANIFEST			This list of files
 README.md
 README
+script/mars
 t/00-load.t
 t/manifest.t
 t/pod-coverage.t
