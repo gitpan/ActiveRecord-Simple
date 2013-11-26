@@ -10,11 +10,11 @@ ActiveRecord::Simple - Simple to use lightweight implementation of ActiveRecord 
 
 =head1 VERSION
 
-Version 0.51
+Version 0.52
 
 =cut
 
-our $VERSION = '0.51';
+our $VERSION = '0.52';
 
 use utf8;
 use Encode;
@@ -286,7 +286,7 @@ sub exists {
         return $ref->_is_exists_in_database;
     }
     # else
-    return $ref->find(@params)->fetch->is_defined;
+    return $ref->find(@params)->fetch;
 }
 
 sub first {
@@ -560,19 +560,18 @@ sub fetch {
                 @{ $self->{BIND}}
             );
 
-        if (defined $resultset && ref $resultset eq 'ARRAY' && scalar @$resultset > 0) {
-            my $class = ref $self;
-            for my $object_data (@$resultset) {
-                my $obj = bless $object_data, $class;
-                $obj->{read_only} = 1 if defined $read_only;
-                $obj->{snapshoot} = freeze($object_data) if $obj->_smart_saving_used;
-                $obj->{isin_database} = 1;
+        return unless defined $resultset
+                      && ref $resultset eq 'ARRAY'
+                      && scalar @$resultset > 0;
 
-                push @objects, $obj;
-            }
-        }
-        else {
-            push @objects, $self;
+        my $class = ref $self;
+        for my $object_data (@$resultset) {
+            my $obj = bless $object_data, $class;
+            $obj->{read_only} = 1 if defined $read_only;
+            $obj->{snapshoot} = freeze($object_data) if $obj->_smart_saving_used;
+            $obj->{isin_database} = 1;
+
+            push @objects, $obj;
         }
 
         $self->{_objects} = \@objects;
@@ -755,7 +754,7 @@ ActiveRecord::Simple
 
 =head1 VERSION
 
-0.51
+0.52
 
 =head1 DESCRIPTION
 
