@@ -25,4 +25,4 @@ requires:
   perl: 5.010
 resources:
   repository: https://github.com/shootnix/activerecord-simple
-version: 0.52
+version: 0.53
