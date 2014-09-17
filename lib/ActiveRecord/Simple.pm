@@ -14,7 +14,7 @@ Version 0.61.0
 
 =cut
 
-our $VERSION = '0.61.0';
+our $VERSION = '0.61';
 
 use utf8;
 use Encode;

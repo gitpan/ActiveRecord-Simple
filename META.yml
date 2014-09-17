@@ -26,4 +26,4 @@ requires:
   perl: 5.010
 resources:
   repository: https://github.com/shootnix/activerecord-simple
-version: v0.61.0
+version: 0.61
