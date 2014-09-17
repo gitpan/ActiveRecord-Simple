@@ -35,6 +35,7 @@
          "requires" : {
             "DBI" : "0",
             "Module::Load" : "0",
+            "SQL::Translator" : "0",
             "Storable" : "0",
             "perl" : "5.010"
          }
@@ -46,5 +47,5 @@
          "url" : "https://github.com/shootnix/activerecord-simple"
       }
    },
-   "version" : "0.53"
+   "version" : "v0.61.0"
 }

@@ -10,17 +10,18 @@ ActiveRecord::Simple - Simple to use lightweight implementation of ActiveRecord 
 
 =head1 VERSION
 
-Version 0.53
+Version 0.61.0
 
 =cut
 
-our $VERSION = '0.53';
+our $VERSION = '0.61.0';
 
 use utf8;
 use Encode;
 use Module::Load;
 use Carp;
 use Storable qw/freeze/;
+use SQL::Translator;
 
 my $dbhandler = undef;
 my $TRACE     = defined $ENV{ACTIVE_RECORD_SIMPLE_TRACE} ? 1 : undef;
@@ -42,21 +43,10 @@ sub new {
             next RELNAME if $class->can($pkg_method_name);
 
             *{$pkg_method_name} = sub {
-                my ($self, $new_rel_class) = @_;
+                my ($self, @rels) = @_;
 
                 my $rel = $class->_get_relations->{$relname};
                 my $fkey = $rel->{foreign_key} || $rel->{key};
-                if ($new_rel_class) {
-                    $rel->{type} eq 'one' or return; ### works only with one object
-                    ref $new_rel_class eq $rel->{class} or return;
-                    $new_rel_class->can('_get_primary_key') or return;
-                    my $pkey = $new_rel_class->_get_primary_key or return;
-                    my $pkeyval = $new_rel_class->$pkey or return;
-                    delete $self->{"relation_instance_$relname"};
-
-                    $self->{$fkey} = $new_rel_class->$pkey;
-                    return $self;
-                }
                 ### else
                 if (!$self->{"relation_instance_$relname"}) {
                     my $rel  = $class->_get_relations->{$relname};
@@ -106,6 +96,14 @@ sub new {
                                 self       => $self,
                             });
                     }
+                    elsif ($type eq 'generic_to_generic') {
+                        my %find_attrs;
+                        while (my ($k, $v) = each %{ $rel->{key} }) {
+                            $find_attrs{$v} = $self->$k;
+                        }
+                        $self->{"relation_instance_$relname"} =
+                            $rel_class->find(\%find_attrs);
+                    }
                 }
 
                 $self->{"relation_instance_$relname"};
@@ -127,6 +125,10 @@ sub _find_many_to_many {
     my $mc_fkey;
     my $class_opts = {};
     my $root_class_opts = {};
+
+    #my $m_class = $param->{m_class};
+    #load $m_class;
+    load $param->{m_class};
 
     for my $opts ( values %{ $param->{m_class}->_get_relations } ) {
         if ($opts->{class} eq $param->{root_class}) {
@@ -186,6 +188,10 @@ sub _mk_accessors {
         next FIELD if $class->can($pkg_accessor_name);
         *{$pkg_accessor_name} = sub {
             if ( scalar @_ > 1 ) {
+                $class->_validate_field($f, $_[1])
+                    or croak "Validation error for `$f`: " . $class->_get_validation_error;
+
+
                 $_[0]->{$f} = $_[1];
 
                 return $_[0];
@@ -199,16 +205,158 @@ sub _mk_accessors {
     return 1;
 }
 
+sub _validate_field {
+    my ($class, $name, $val) = @_;
+
+    return 1 unless $class->can('_get_schema_table');
+
+    my $fld = $class->_get_schema_table->get_field($name);
+
+    my $check_result = _check($val, {
+        data_type   => $fld->{data_type},
+        is_nullable => $fld->{is_nullable},
+        size        => $fld->{size},
+    });
+
+    if ($check_result->{error}) {
+        $class->_mk_attribute_getter('_get_validation_error', $check_result->{error});
+
+        return;
+    }
+
+    return 1;
+}
+
+sub _check {
+    my ($val, $fld) = @_;
+
+    if (exists $fld->{is_nullable}) {
+        _check_for_null($val, $fld->{is_nullable})
+            or return { error => "Can't be null" };
+    }
+
+    if (exists $fld->{data_type}) {
+        _check_for_data_type($val, $fld->{data_type}, $fld->{size})
+            or return { error => "Invalid value for type " . $fld->{data_type} };
+    }
+
+    return { result => 1 };
+}
+
+sub belongs_to {
+    my ($class, $rel_name, $rel_class, $key) = @_;
+
+    my $new_relation = {
+        class => $rel_class,
+        type => 'one',
+        key => $key
+    };
+
+    if ($class->can('_get_schema_table') && $class->can('_get_primary_key')) {
+        load $rel_class;
+        $class->_get_schema_table->add_constraint(
+            type => 'foreign_key',
+            fields => $key,
+            reference_fields => $class->_get_primary_key,
+            reference_table => $rel_class->_get_table_name,
+            on_delete => 'cascade'
+        );
+    }
+
+    return $class->_append_relation($rel_name => $new_relation);
+}
+
+sub has_many {
+    my ($class, $rel_name, $rel_class, $key) = @_;
+
+    my $new_relation = {
+        class => $rel_class,
+        type => 'many'
+    };
+    $new_relation->{key} = $key if defined $key;
+
+    return $class->_append_relation($rel_name => $new_relation);
+}
+
+sub as_sql {
+    my ($class, $producer_name, %args) = @_;
+
+    my $t = SQL::Translator->new;
+    my $schema = $t->schema;
+    $schema->add_table($class->_get_schema_table);
+
+    $t->producer($producer_name || 'PostgreSQL', %args);
+
+    return $t->translate;
+}
+
+sub generic {
+    my ($class, $rel_name, $rel_class, $key) = @_;
+
+    my $new_relation = {
+        class => $rel_class,
+        type => 'generic',
+        key => $key
+    };
+
+    return $class->_append_relation($rel_name => $new_relation);
+}
+
+sub _append_relation {
+    my ($class, $rel_name, $rel_hashref) = @_;
+
+    if ($class->can('_get_relations')) {
+        my $relations = $class->_get_relations();
+
+        $relations->{$rel_name} = $rel_hashref;
+        $class->relations($relations);
+    }
+    else {
+        $class->relations({ $rel_name => $rel_hashref });
+    }
+
+    return;
+}
+
 sub columns {
     my ($class, $columns) = @_;
 
     $class->_mk_attribute_getter('_get_columns', $columns);
 }
 
+sub fields {
+    my ($class, %fields) = @_;
+
+    my $sql_translator = SQL::Translator->new(no_comments => 1);
+    my $schema = $sql_translator->schema;
+    my $table = $schema->add_table(name => $class->_get_table_name);
+
+    FIELD:
+    for my $field (keys %fields) {
+        $table->add_field(name => $field, %{ $fields{$field} });
+    }
+
+    $class->_mk_attribute_getter('_get_schema_table', $table);
+    $class->columns([keys %fields]);
+}
+
+sub index {
+    my ($class, $index_name, $fields) = @_;
+
+    if ($class->can('_get_schema_table')) {
+        $class->_get_schema_table->add_index(
+            name => $index_name,
+            fields => $fields
+        );
+    }
+}
+
 sub primary_key {
     my ($class, $primary_key) = @_;
 
     $class->_mk_attribute_getter('_get_primary_key', $primary_key);
+    $class->_get_schema_table->primary_key($primary_key)
+        if $class->can('_get_schema_table')
 }
 
 sub table_name {
@@ -382,9 +530,18 @@ sub _insert {
     };
 
     if ( $self->dbh->{Driver}{Name} eq 'Pg' ) {
-        $sql_stm .= ' returning ' . $primary_key if $primary_key;
-        $self->{SQL} = $sql_stm; $self->_quote_sql_stmt; say $self->{SQL} if $TRACE;
-        $pkey_val = $self->dbh->selectrow_array($self->{SQL}, undef, @bind);
+        if ($primary_key) {
+            $sql_stm .= ' returning ' . $primary_key if $primary_key;
+            $self->{SQL} = $sql_stm; $self->_quote_sql_stmt; say $self->{SQL} if $TRACE;
+
+            $pkey_val = $self->dbh->selectrow_array($self->{SQL}, undef, @bind);
+        }
+        else {
+            $self->{SQL} = $sql_stm; $self->_quote_sql_stmt; say $self->{SQL} if $TRACE;
+            my $sth = $self->dbh->prepare($self->{SQL});
+
+            $sth->execute(@bind);
+        }
     }
     else {
         $self->{SQL} = $sql_stm; $self->_quote_sql_stmt(); say $self->{SQL} if $TRACE;
@@ -745,53 +902,115 @@ sub to_hash {
 }
 
 sub increment {
-    my ($self, $param) = @_;
+    my ($self, @fields) = @_;
 
-    return unless $self->dbh;
-    return unless $param;
-
-    my $table_name = $self->_get_table_name;
-    my $pkey = $self->_get_primary_key;
-    return unless $self->{$pkey};
-
-    my $sql = qq{
-        update "$table_name" set $param = $param + 1 where $pkey = ?
-    };
-
-    my $res = undef;
-    $self->{SQL} = $sql; $self->_quote_sql_stmt; say $self->{SQL} if $TRACE;
-    if ( $self->dbh->do($self->{SQL}, undef, $self->{$pkey}) ) {
-        $self->{$param}++;
-
-        $res = 1;
+    FIELD:
+    for my $field (@fields) {
+        next FIELD if not exists $self->{$field};
+        $self->{$field} += 1;
     }
 
-    return $res;
+    return $self;
 }
 
 sub decrement {
-    my ($self, $param) = @_;
+    my ($self, @fields) = @_;
 
-    return unless $self->dbh;
-    return unless $param;
-
-    my $table_name = $self->_get_table_name;
-    my $pkey = $self->_get_primary_key;
-    return unless $self->{$pkey};
-
-    my $sql = qq{
-        update "$table_name" set $param = $param - 1 where $pkey = ?
-    };
-
-    my $res = undef;
-    $self->{SQL} = $sql; $self->_quote_sql_stmt; say $self->{SQL} if $TRACE;
-    if ( $self->dbh->do($self->{SQL}, undef, $self->{$pkey}) ) {
-        $self->{$param}--;
-
-        $res = 1;
+    FIELD:
+    for my $field (@fields) {
+        next FIELD if not exists $self->{$field};
+        $self->{$field} -= 1;
     }
 
-    return $res;
+    return $self;
+}
+
+sub _check_for_null {
+    my ($val, $is_nullable) = @_;
+
+    if ($is_nullable == 0 && (not defined $val || $val eq '')) {
+        return undef;
+    }
+    # else
+    return 1;
+}
+
+sub _check_for_data_type {
+    my ($val, $data_type, $size) = @_;
+
+    return 1 unless $data_type;
+
+    my %TYPE_CHECKS = (
+        int      => \&_check_int,
+        integer  => \&_check_int,
+        tinyint  => \&_check_int,
+        smallint => \&_check_int,
+        bigint   => \&_check_int,
+
+        double => \&_check_numeric,
+       'double precision' => \&_check_numeric,
+
+        decimal => \&_check_numeric,
+        dec => \&_check_numeric,
+        numeric => \&_check_numeric,
+
+        real => \&_check_float,
+        float => \&_check_float,
+
+        bit => \&_check_bit,
+
+        date => \&_check_DUMMY, # DUMMY
+        datetime => \&_check_DUMMY, # DUMMY
+        timestamp => \&_check_DUMMY, # DUMMY
+        time => \&_check_DUMMY, # DUMMY
+
+        char => \&_check_char,
+        varchar => \&_check_varchar,
+
+        binary => \&_check_DUMMY, # DUMMY
+        varbinary => \&_check_DUMMY, # DUMMY
+        tinyblob => \&_check_DUMMY, # DUMMY
+        blob => \&_check_DUMMY, # DUMMY
+        text => \&_check_DUMMY,
+    );
+
+    return (exists $TYPE_CHECKS{$data_type}) ? $TYPE_CHECKS{$data_type}->($val, $size) : 1;
+}
+
+sub _check_DUMMY { 1 }
+sub _check_int { shift =~ /^\d+$/ }
+sub _check_varchar {
+    my ($val, $size) = @_;
+
+    return length $val <= $size->[0];
+}
+sub _check_char {
+    my ($val, $size) = @_;
+
+    return length $val == $size->[0];
+}
+sub _check_float { shift =~ /^\d+\.\d+$/ }
+
+sub _check_numeric {
+    my ($val, $size) = @_;
+
+    return 1 unless
+        defined $size &&
+        ref $size eq 'ARRAY' &&
+        scalar @$size == 2;
+
+    my ($first, $last) = $val =~ /^(\d+)\.(\d+)$/;
+
+    $first && length $first <= $size->[0] or return;
+    $last && length $last <= $size->[1] or return;
+
+    return 1;
+}
+
+sub _check_bit {
+    my ($val) = @_;
+
+    return ($val == 0 || $val == 1) ? 1 : undef;
 }
 
 1;
@@ -804,7 +1023,7 @@ ActiveRecord::Simple
 
 =head1 VERSION
 
-0.53
+0.60.1
 
 =head1 DESCRIPTION
 
@@ -852,18 +1071,8 @@ That's it! Now you're ready to use your active-record class in the application:
     }
 
     # You can add any relationships to your tables:
-    __PACKAGE__->relations({
-        cars => {
-            class => 'MyModel::Car',
-            key   => 'id_person',
-            type  => 'many',
-        },
-        wife => {
-            class => 'MyModel::Wife',
-            key   => 'id_person',
-            type  => 'one',
-        }
-    });
+    __PACKAGE__->has_many(cars => 'MyModel::Car' => 'id_preson');
+    __PACKAGE__->belongs_to(wife => 'MyModel::Wife' => 'id_person');
 
     # And then, you're ready to go:
     say $person->cars->fetch->id; # if the relation is one to many
@@ -901,12 +1110,45 @@ just creates a new record in memory.
 Set names of the table columns and add accessors to object of the class. This
 method is required to use in the child (your model) classes.
 
+=head2 fields
+
+    __PACKAGE__->fields(
+        id_person => {
+            data_type => 'int',
+            is_auto_increment => 1,
+            is_primary_key => 1
+        },
+        first_name => {
+            data_type => 'varchar',
+            size => 64,
+            is_nullable => 0
+        },
+        second_name => {
+            data_type => 'varchar',
+            size => 64,
+            is_nullable => 0,
+        }
+    );
+
+Create SQL-Schema and data type validation for each specified field using SQL::Translator features.
+No need "columns" method, if you use "fields".
+
+See SQL::Translator for more information about schema, SQL::Translator::Field for information
+about available data types.
+
+
 =head2 primary_key
 
     __PACKAGE__->primary_key('id_person');
 
 Set name of the primary key. This method is not required to use in the child
 (your model) classes.
+
+=head2 index
+
+    __PACKAGE__->index('index_id_person', ['id_person']);
+
+Create an index and add it to the schema. Works only when method "fields" is using.
 
 =head2 table_name
 
@@ -915,7 +1157,7 @@ Set name of the primary key. This method is not required to use in the child
 Set name of the table. This method is required to use in the child (your model)
 classes.
 
-=head2 relations
+=head2 relations [!OLD!, may be deprecated in the future]
 
     __PACKAGE__->relations({
         cars => {
@@ -942,6 +1184,41 @@ just keep this simple schema in youre mind:
     associated with this relationship. Allowed to use as many keys as you need:
 
     $package_instance->[relation key]->[any method from the related class];
+
+=head2 belongs_to
+
+    __PACKAGE__->belongs_to(home => 'Home', 'home_id');
+
+    This is equal to:
+    __PACKAGE__->relations({
+        home => {
+            class => 'Home',
+            key => 'home_id',
+            type => 'one'
+        }
+    });
+
+=head2 has_many
+
+    __PACKAGE__->has_many(cars => 'Car', 'car_id');
+
+    This is equal to:
+    __PACKAGE__->relations({
+        home => {
+            class => 'Car',
+            type => 'many',
+            hey => 'car_id'
+        }
+    });
+
+=head2 generic
+
+    __PACKAGE__->generic(photos => { release_date => 'pub_date' });
+
+    Creates a generic relations.
+
+    my $single = Song->find({ type => 'single' })->fetch();
+    my @photos = $single->photos->fetch();  # fetch all photos with pub_date = single.release_date
 
 =head2 use_smart_saving
 
@@ -1051,6 +1328,12 @@ Decrement the field value:
     say $person->age;  # prints e.g. 100
     $person->decrement('age');
     say $person->age; # prints 99
+
+=head2 as_sql
+
+    say MyModel::Person->as_sql('PostgreSQL');
+
+Create an SQL-schema from method "fields". See SQL::Translator for more details.
 
 =head2 dbh
 
