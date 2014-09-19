@@ -10,11 +10,11 @@ ActiveRecord::Simple - Simple to use lightweight implementation of ActiveRecord 
 
 =head1 VERSION
 
-Version 0.63
+Version 0.64
 
 =cut
 
-our $VERSION = '0.63';
+our $VERSION = '0.64';
 
 use utf8;
 use Encode;
@@ -59,6 +59,7 @@ sub new {
 
                     load $rel_class;
 
+                    ### TODO: check for relation existing
                     while (my ($rel_key, $rel_opts) = each %{ $rel_class->_get_relations }) {
                         my $rel_opts_class = (ref $rel_opts->{class} eq 'HASH') ?
                             (%{ $rel_opts->{class} })[1]
@@ -66,32 +67,25 @@ sub new {
                         $type .= $rel_opts->{type} if $rel_opts_class eq $class;
                     }
 
-                    if ($type eq 'one_to_many' or $type eq 'one_to_one') {
-                        my ($pkey, $fkey_val);
-                        if ($rel_class->can('_get_primary_key')) {
-                            $pkey = $rel_class->_get_primary_key;
-                            $fkey_val = $self->$fkey;
-                        }
-                        else {
-                            $pkey = $fkey;
-                            my $self_pkey = $self->_get_primary_key;
-                            $fkey_val = $self->$self_pkey;
-                        }
+                    if ($type eq 'one_to_many' or $type eq 'one_to_one' or $type eq 'one_to_only') {
+                        my $fkey = $rel->{params}{fk};
+                        my $pkey = $rel->{params}{pk};
 
                         $self->{"relation_instance_$relname"} =
-                            $rel_class->find("$pkey = ?", $fkey_val)->fetch;
+                            $rel_class->find("$pkey = ?", $self->$fkey)->fetch // $rel_class;
                     }
                     elsif ($type eq 'only_to_one') {
-                        my $self_pkey = $self->_get_primary_key;
-                        my $pkey_val = $self->$self_pkey;
+                        my $fkey = $rel->{params}{fk};
+                        my $pkey = $rel->{params}{pk};
 
                         $self->{"relation_instance_$relname"} =
-                            $rel_class->find("$rel->{key} = ?", $pkey_val)->fetch;
+                            $rel_class->find("$fkey = ?", $self->$pkey)->fetch;
                     }
                     elsif ($type eq 'many_to_one') {
                         return $rel_class->new() if not $self->can('_get_primary_key');
+                        my $fkey = $rel->{params}{fk};
+                        my $pkey = $rel->{params}{pk};
 
-                        my $pkey = $self->_get_primary_key;
                         $self->{"relation_instance_$relname"}
                             = $rel_class->find("$fkey = ?", $self->$pkey);
                     }
@@ -133,8 +127,6 @@ sub _find_many_to_many {
     my $class_opts = {};
     my $root_class_opts = {};
 
-    #my $m_class = $param->{m_class};
-    #load $m_class;
     load $param->{m_class};
 
     for my $opts ( values %{ $param->{m_class}->_get_relations } ) {
@@ -158,9 +150,9 @@ sub _find_many_to_many {
         ' on ' .
         $connected_table_name . '.' . $class->_get_primary_key .
         ' = ' .
-        $param->{m_class}->_get_table_name . '.' . $class_opts->{key} .
+        $param->{m_class}->_get_table_name . '.' . $class_opts->{params}{fk} .
         ' where ' .
-        $root_class_opts->{key} .
+        $root_class_opts->{params}{fk} .
         ' = ' .
         $param->{self}->{ $param->{root_class}->_get_primary_key };
 
@@ -220,9 +212,10 @@ sub _validate_field {
     my $fld = $class->_get_schema_table->get_field($name);
 
     my $check_result = _check($val, {
-        data_type   => $fld->{data_type},
-        is_nullable => $fld->{is_nullable},
-        size        => $fld->{size},
+        data_type     => $fld->{data_type},
+        is_nullable   => $fld->{is_nullable},
+        size          => $fld->{size},
+        default_value => $fld->{default_value},
     });
 
     if ($check_result->{error}) {
@@ -238,8 +231,12 @@ sub _check {
     my ($val, $fld) = @_;
 
     if (exists $fld->{is_nullable}) {
-        _check_for_null($val, $fld->{is_nullable})
-            or return { error => "Can't be null" };
+        _check_for_null(
+            $val,
+            $fld->{is_nullable},
+            (exists $fld->{default_value} && defined $fld->{default_value})
+        )
+        or return { error => "Can't be null" };
     }
 
     if (exists $fld->{data_type}) {
@@ -251,19 +248,32 @@ sub _check {
 }
 
 sub belongs_to {
-    my ($class, $rel_name, $rel_class, $key) = @_;
+    my ($class, $rel_name, $rel_class, $params) = @_;
 
     my $new_relation = {
         class => $rel_class,
         type => 'one',
-        key => $key
+        #params => $params
+    };
+
+    my $primary_key = $params->{pk} ||
+        $params->{primary_key} ||
+        _guess(primary_key => $class);
+
+    my $foreign_key = $params->{fk} ||
+        $params->{foreign_key} ||
+        _guess(foreign_key => $rel_class);
+
+    $new_relation->{params} = {
+        pk => $primary_key,
+        fk => $foreign_key,
     };
 
     if ($class->can('_get_schema_table') && $class->can('_get_primary_key')) {
         load $rel_class;
         $class->_get_schema_table->add_constraint(
             type => 'foreign_key',
-            fields => $key,
+            fields => $params, ### TODO: !!!this is wrong!!!
             reference_fields => $class->_get_primary_key,
             reference_table => $rel_class->_get_table_name,
             on_delete => 'cascade'
@@ -274,22 +284,68 @@ sub belongs_to {
 }
 
 sub has_many {
-    my ($class, $rel_name, $rel_class, $key) = @_;
+    my ($class, $rel_name, $rel_class, $params) = @_;
 
     my $new_relation = {
         class => $rel_class,
-        type => 'many'
+        type => 'many',
     };
-    $new_relation->{key} = $key if defined $key;
+
+    $params ||= {};
+    #my ($primary_key, $foreign_key);
+    my $primary_key = $params->{pk} ||
+        $params->{primary_key} ||
+        _guess(primary_key => $class);
+
+    my $foreign_key = $params->{fk} ||
+        $params->{foreign_key} ||
+        _guess(foreign_key => $class);
+
+    $new_relation->{params} = {
+        pk => $primary_key,
+        fk => $foreign_key,
+    };
 
     return $class->_append_relation($rel_name => $new_relation);
 }
 
+sub _guess {
+    my ($what_key, $class) = @_;
+
+    return 'id' if $what_key eq 'primary_key';
+
+    load $class;
+
+    my $table_name = $class->_get_table_name;
+    return ($what_key eq 'foreign_key') ? "$table_name\_id" : undef;
+}
+
 sub has_one {
-    my ($class, $rel_name, $rel_class, $key) = @_;
+    my ($class, $rel_name, $rel_class, $params) = @_;
+
+    my $new_relation = {
+        class => $rel_class,
+        type => 'only',
+    };
+
+    $params ||= {};
+    #my ($primary_key, $foreign_key);
+    my $primary_key = $params->{pk} ||
+        $params->{primary_key} ||
+        _guess(primary_key => $class);
+
+    my $foreign_key = $params->{fk} ||
+        $params->{foreign_key} ||
+        _guess(foreign_key => $class);
+
+    $new_relation->{params} = {
+        pk => $primary_key,
+        fk => $foreign_key,
+    };
 
     #$class->_mk_attribute_getter('_get_secondary_key', $key);
-    $class->_append_relation($rel_name => { class => $rel_class, key => $key, type => 'only' });
+    ### TODO: add schema constraints
+    $class->_append_relation($rel_name => $new_relation);
 }
 
 sub as_sql {
@@ -336,7 +392,36 @@ sub _append_relation {
 }
 
 sub columns {
-    my ($class, $columns) = @_;
+    my ($class, @we_got) = @_;
+
+    my $columns = [];
+    if (scalar @we_got == 1) {
+        #$columns = $we_got[0];
+        if (ref $we_got[0] && ref $we_got[0] eq 'ARRAY') {
+            $columns = $we_got[0];
+        }
+        elsif (ref $we_got[0] && ref $we_got[0] eq 'HASH') {
+            $columns = [keys %{ $we_got[0] }];
+            $class->fields(%{ $we_got[0] });
+        }
+        else {
+            # just one column?
+            push @$columns, @we_got;
+        }
+    }
+    elsif (scalar @we_got > 1) {
+
+        if (ref $we_got[1] && ref $we_got[1] eq 'HASH') {
+            # hash of hashes
+            push @$columns, keys {@we_got};
+            $class->fields(@we_got);
+        }
+        else {
+            # or plain array?
+            push @$columns, @we_got;
+        }
+
+    }
 
     $class->_mk_attribute_getter('_get_columns', $columns);
 }
@@ -718,6 +803,15 @@ sub only {
     return $self;
 }
 
+sub to_sql {
+    my ($self) = @_;
+
+    $self->_finish_sql_stmt();
+    $self->_quote_sql_stmt();
+
+    return wantarray ? ($self->{SQL}, $self->{BIND}) : $self->{SQL};
+}
+
 sub fetch {
     my ($self, $param) = @_;
 
@@ -952,10 +1046,10 @@ sub decrement {
 }
 
 sub _check_for_null {
-    my ($val, $is_nullable) = @_;
+    my ($val, $is_nullable, $has_default_value) = @_;
 
-    if ($is_nullable == 0 && (not defined $val || $val eq '')) {
-        return undef;
+    if ($is_nullable == 0 && (not defined $val or $val eq '')) {
+        return $has_default_value ? 1 : undef;
     }
     # else
     return 1;
@@ -1495,6 +1589,17 @@ Convert objects data to the simple perl hash:
     use JSON::XS;
 
     say encode_json({ person => $peron->to_hash });
+
+=head2 to_sql
+
+Convert aobject to SQL-query:
+
+    my $sql = Person->find({ name => 'Bill' })->limit(1)->to_sql;
+    # select * from persons where name = ? limit 1;
+
+    my ($sql, $binds) = Person->find({ name => 'Bill' })->to_sql;
+    # sql: select * from persons where name = ? limit 1;
+    # binds: ['Bill']
 
 =head2 is_defined
 
