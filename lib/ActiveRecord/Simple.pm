@@ -10,18 +10,17 @@ ActiveRecord::Simple - Simple to use lightweight implementation of ActiveRecord 
 
 =head1 VERSION
 
-Version 0.64
+Version 0.65
 
 =cut
 
-our $VERSION = '0.64';
+our $VERSION = '0.65';
 
 use utf8;
 use Encode;
 use Module::Load;
 use Carp;
 use Storable qw/freeze/;
-use SQL::Translator;
 
 my $dbhandler = undef;
 my $TRACE     = defined $ENV{ACTIVE_RECORD_SIMPLE_TRACE} ? 1 : undef;
@@ -351,6 +350,9 @@ sub has_one {
 sub as_sql {
     my ($class, $producer_name, %args) = @_;
 
+    eval { require SQL::Translator }
+      || croak('Please install SQL::Translator to use this feature.');
+
     $class->can('_get_schema_table')
         or return;
 
@@ -392,33 +394,32 @@ sub _append_relation {
 }
 
 sub columns {
-    my ($class, @we_got) = @_;
+    my ($class, @args) = @_;
 
     my $columns = [];
-    if (scalar @we_got == 1) {
-        #$columns = $we_got[0];
-        if (ref $we_got[0] && ref $we_got[0] eq 'ARRAY') {
-            $columns = $we_got[0];
+    if (scalar @args == 1) {
+        my $arg = shift @args;
+        if (ref $arg && ref $arg eq 'ARRAY') {
+            $columns = $arg;
         }
-        elsif (ref $we_got[0] && ref $we_got[0] eq 'HASH') {
-            $columns = [keys %{ $we_got[0] }];
-            $class->fields(%{ $we_got[0] });
+        elsif (ref $arg && ref $arg eq 'HASH') {
+            $columns = [keys %$arg];
+            $class->fields(%$arg);
         }
         else {
             # just one column?
-            push @$columns, @we_got;
+            push @$columns, $arg;
         }
     }
-    elsif (scalar @we_got > 1) {
-
-        if (ref $we_got[1] && ref $we_got[1] eq 'HASH') {
+    elsif (scalar @args > 1) {
+        if (@args % 2 == 0) {
             # hash of hashes
-            push @$columns, keys {@we_got};
-            $class->fields(@we_got);
+            my %fields = @args;
+            $class->fields(%fields);
         }
         else {
             # or plain array?
-            push @$columns, @we_got;
+            push @$columns, @args;
         }
 
     }
@@ -428,6 +429,9 @@ sub columns {
 
 sub fields {
     my ($class, %fields) = @_;
+
+    eval { require SQL::Translator }
+      || croak('Please install SQL::Translator to use this feature. ');
 
     my $sql_translator = SQL::Translator->new(no_comments => 1);
     my $schema = $sql_translator->schema;
@@ -1143,7 +1147,7 @@ ActiveRecord::Simple
 
 =head1 VERSION
 
-0.63
+0.64
 
 =head1 DESCRIPTION
 
@@ -1157,7 +1161,7 @@ pattern. It's fast, very simple and very light.
     use base 'ActiveRecord::Simple';
 
     __PACKAGE__->table_name('persons');
-    __PACKAGE__->columns(['id', 'name']);
+    __PACKAGE__->columns('id', 'name');
     __PACKAGE__->primary_key('id');
 
     1;
@@ -1226,9 +1230,37 @@ just creates a new record in memory.
 =head2 columns
 
     __PACKAGE__->columns([qw/id_person first_name second_name]);
+    # or
+    __PACKAGE__->columns('id_person', 'first_name', 'second_name');
+    # or
+    __PACKAGE__->columns({
+        id_person => {
+            # ...
+        },
+        first_name => {
+            # ...
+        },
+        second_name => {
+            # ...
+        }
+    });
+    # or
+    __PACKAGE__->columns(
+        id_person => {
+            # ...
+        },
+        first_name => {
+            # ...
+        },
+        second_name => {
+            # ...
+        }
+    );
 
-Set names of the table columns and add accessors to object of the class. This
-method is required to use in the child (your model) classes.
+This method is required.
+Set names of the table columns and add accessors to object of the class.
+If you set a hash or a hashref with additional parameters, the method will be dispatched to
+another method, "fields".
 
 =head2 fields
 
@@ -1250,12 +1282,12 @@ method is required to use in the child (your model) classes.
         }
     );
 
+This method requires L<SQL::Translator> to be installed.
 Create SQL-Schema and data type validation for each specified field using SQL::Translator features.
-No need "columns" method, if you use "fields".
+You don't need to call "columns" method explicitly, if you use "fields".
 
-See SQL::Translator for more information about schema, SQL::Translator::Field for information
-about available data types.
-
+See L<SQL::Translator> for more information about schema and L<SQL::Translator::Field>
+for information about available data types.
 
 =head2 primary_key
 
@@ -1315,33 +1347,34 @@ just keep this simple schema in youre mind:
 
 =head2 belongs_to
 
-    __PACKAGE__->belongs_to(home => 'Home', 'home_id');
+    __PACKAGE__->belongs_to(home => 'Home');
 
-    This is equal to:
-    __PACKAGE__->relations({
-        home => {
-            class => 'Home',
-            key => 'home_id',
-            type => 'one'
-        }
+This method describes one-to-one objects relationship. By default ARS think
+that primary key name is "id", foreign key name is "[table_name]_id".
+You can specify it by parameters:
+
+    __PACKAGE__->belongs_to(home => 'Home', {
+        primary_key => 'id',
+        foreign_key => 'home_id'
     });
 
 =head2 has_many
 
-    __PACKAGE__->has_many(cars => 'Car', 'car_id');
+    __PACKAGE__->has_many(cars => 'Car');
+    __PACKAGE__->has_many(cars => 'Car', {
+        primary_key => 'id',
+        foreign_key => 'car_id'
+    })
 
-    This is equal to:
-    __PACKAGE__->relations({
-        home => {
-            class => 'Car',
-            type => 'many',
-            hey => 'car_id'
-        }
-    });
+This method describes one-to-many objects relationship.
 
 =head2 has_one
 
-    __PACKAGE__->has_one(wife => 'Wife', 'person_id');
+    __PACKAGE__->has_one(wife => 'Wife');
+    __PACKAGE__->has_one(wife => 'Wife', {
+        primary_key => 'id',
+        foreign_key => 'wife_id'
+    });
 
 You can specify one object via another one using "has_one" method. It works like that:
 
@@ -1469,7 +1502,8 @@ Decrement the field value:
 
     say MyModel::Person->as_sql('PostgreSQL');
 
-Create an SQL-schema from method "fields". See SQL::Translator for more details.
+This method requires L<SQL::Translator> to be installed.
+Create an SQL-schema using method "fields". See SQL::Translator for more details.
 
 =head2 dbh
 
@@ -1634,7 +1668,8 @@ Another syntax of command "fetch" allows you to make read-only objects:
 
 =head1 SEE ALSO
 
-    DBIx::ActiveRecord
+    L<DBIx::ActiveRecord>, L<SQL::Translator>
+
 
 =head1 MORE INFO
 
